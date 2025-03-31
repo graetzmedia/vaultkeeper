@@ -1,0 +1,94 @@
+<\!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VaultKeeper - Media Asset Manager</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+    <header>
+        <div class="container">
+            <div class="logo">VaultKeeper</div>
+            <nav>
+                <ul>
+                    <li><a href="/">Dashboard</a></li>
+                    <li><a href="/drives">Drives</a></li>
+                    <li><a href="/assets">Assets</a></li>
+                    <li><a href="/reports">Reports</a></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+    
+    <div class="container">
+        <div class="card">
+            <h2>Welcome to VaultKeeper</h2>
+            <p>Your comprehensive media asset tracking and cataloging system for archived files.</p>
+            <a href="/drives/register" class="button">Register New Drive</a>
+        </div>
+        
+        <div class="dashboard-grid">
+            <div class="card status-card">
+                <div class="label">Total Drives</div>
+                <div class="number" id="total-drives">0</div>
+            </div>
+            <div class="card status-card">
+                <div class="label">Healthy Drives</div>
+                <div class="number" id="healthy-drives">0</div>
+            </div>
+            <div class="card status-card">
+                <div class="label">Degraded Drives</div>
+                <div class="number" id="degraded-drives">0</div>
+            </div>
+            <div class="card status-card">
+                <div class="label">Failing Drives</div>
+                <div class="number" id="failing-drives">0</div>
+            </div>
+        </div>
+        
+        <div class="card">
+            <h3>Storage Overview</h3>
+            <p><span id="used-storage">0</span> TB used of <span id="total-storage">0</span> TB total (<span id="used-percent">0</span>%)</p>
+            <p>Total media assets: <strong id="total-assets">0</strong></p>
+        </div>
+        
+        <div class="card">
+            <h3>Recent Drives</h3>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Name</th>
+                        <th>Location</th>
+                        <th>Health</th>
+                        <th>Size</th>
+                        <th>Used</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="drives-table-body">
+                    <\!-- Drive rows will be inserted here by JavaScript -->
+                </tbody>
+            </table>
+            <a href="/drives" class="button secondary">View All Drives</a>
+        </div>
+        
+        <div class="card">
+            <h3>Quick Actions</h3>
+            <a href="/drives/register" class="button">Register Drive</a>
+            <a href="/drives/batch-scan" class="button secondary">Batch Scan</a>
+            <a href="/reports" class="button secondary">Generate Report</a>
+        </div>
+    </div>
+    
+    <footer>
+        <div class="container">
+            <p>VaultKeeper &copy; 2024 - Media Asset Management System</p>
+            <p>Remote access enabled: <a href="http://localhost:6080/vnc.html">GUI Access</a> | <a href="ssh://localhost:2222">SSH</a></p>
+        </div>
+    </footer>
+    
+    <script src="/js/app.js"></script>
+</body>
+</html>
