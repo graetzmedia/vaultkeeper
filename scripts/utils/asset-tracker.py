@@ -547,9 +547,8 @@ def generate_r3d_thumbnail(r3d_path, output_dir=None, width=320, height=240):
         print(f"Error checking R3D file size: {e}")
     
     # Note: The RED SDK integration requires compilation with specific flags
-    # For now, we'll use ffmpeg which works with most R3D files
+    # For now, we'll use a more compatible ffmpeg approach for R3D files
     print(f"Generating thumbnail for R3D file: {r3d_path}")
-    print("Using ffmpeg for R3D thumbnails (RED SDK integration pending)")
     
     try:
         # Create output directory if it doesn't exist
@@ -563,26 +562,67 @@ def generate_r3d_thumbnail(r3d_path, output_dir=None, width=320, height=240):
         thumbnail_name = f"{os.path.splitext(file_basename)[0]}_{uuid.uuid4().hex[:8]}.jpg"
         thumbnail_path = os.path.join(output_dir, thumbnail_name)
         
-        # Try to extract a frame using ffmpeg
-        subprocess.run(
-            [
-                "ffmpeg", 
-                "-y",  # Overwrite output files
-                "-i", r3d_path,  # Input file
-                "-vframes", "1",  # Extract one frame
-                "-q:v", "2",  # Quality (2 is high, 31 is low)
-                "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",  # Scale and pad
-                thumbnail_path  # Output file
-            ],
-            capture_output=True,
-            check=True
-        )
+        # Try different ffmpeg flags for R3D compatibility
+        print("Trying specialized ffmpeg flags for R3D files...")
+        try:
+            # First attempt: Use special flags for RED files
+            subprocess.run(
+                [
+                    "ffmpeg", 
+                    "-y",  # Overwrite output files
+                    "-vsync", "0",  # Avoid frame rate sync issues
+                    "-probesize", "100M",  # Larger probe size for complex formats
+                    "-analyzeduration", "100M",  # Longer analyze duration
+                    "-i", r3d_path,  # Input file
+                    "-vframes", "1",  # Extract one frame
+                    "-q:v", "2",  # Quality (2 is high, 31 is low)
+                    "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",  # Scale and pad
+                    thumbnail_path  # Output file
+                ],
+                capture_output=True,
+                check=True,
+                timeout=60  # Add timeout to avoid hanging
+            )
+            
+            # Verify the thumbnail was created successfully
+            if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+                print(f"Successfully created R3D thumbnail: {thumbnail_path}")
+                return thumbnail_path
+        except subprocess.TimeoutExpired:
+            print("Thumbnail generation timed out, trying simpler approach...")
+        except Exception as e:
+            print(f"First ffmpeg attempt failed: {e}")
+            
+        # Second attempt: Use simpler ffmpeg command
+        try:
+            subprocess.run(
+                [
+                    "ffmpeg", 
+                    "-y",  # Overwrite output files
+                    "-i", r3d_path,  # Input file
+                    "-vframes", "1",  # Extract one frame
+                    thumbnail_path  # Output file
+                ],
+                capture_output=True,
+                check=True,
+                timeout=60  # Add timeout to avoid hanging
+            )
+            
+            # Verify the thumbnail was created successfully
+            if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+                print(f"Successfully created R3D thumbnail with simpler command: {thumbnail_path}")
+                return thumbnail_path
+        except subprocess.TimeoutExpired:
+            print("Second thumbnail attempt timed out")
+        except Exception as e:
+            print(f"Second ffmpeg attempt failed: {e}")
         
-        print(f"Successfully created R3D thumbnail: {thumbnail_path}")
-        return thumbnail_path
+        # If we get to this point, thumbnail generation failed with both methods
+        print(f"Could not generate thumbnail for {file_basename}, skipping")
+        return None
         
     except Exception as e:
-        print(f"Error generating R3D thumbnail: {e}")
+        print(f"Error in thumbnail generation process: {e}")
         return None
 
 def transcribe_audio(file_path, language="auto", model_size="base"):
@@ -921,10 +961,29 @@ def catalog_files(drive_info, conn=None):
                 
                 # Process any video file (including .r3d)
                 if is_r3d or (mime_type and mime_type.startswith("video/")):
-                    # Extract media metadata
-                    media_info = get_media_info(file_path)
-                    if media_info:
-                        print(f"\nExtracted media info for: {rel_path}")
+                    # Handle media info extraction first - different approach for R3D files
+                    if is_r3d:
+                        # For .r3d files, don't try to extract media info with ffprobe as it can be problematic
+                        # Instead, store basic file info
+                        media_info = json.dumps({
+                            "format": {
+                                "filename": file_path,
+                                "format_name": "r3d",
+                                "size": str(file_size)
+                            },
+                            "streams": [
+                                {
+                                    "codec_type": "video",
+                                    "codec_name": "r3d"
+                                }
+                            ]
+                        })
+                        print(f"\nStored basic info for R3D file: {rel_path}")
+                    else:
+                        # For other video files, try normal media info extraction
+                        media_info = get_media_info(file_path)
+                        if media_info:
+                            print(f"\nExtracted media info for: {rel_path}")
                     
                     # Generate thumbnail from video
                     thumbnail_dir = os.path.expanduser(f"~/media-asset-tracker/thumbnails/{drive_info['id']}")
