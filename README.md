@@ -14,6 +14,9 @@ VaultKeeper is a comprehensive system for cataloging, organizing, and tracking m
 - **Batch Processing**: Catalog and health-check multiple drives in sequence
 - **Interactive CLI Menu**: User-friendly text-based menu interface
 - **Transcription Search**: Find files by spoken content in audio tracks
+- **Flexible Storage Organization**: Place drives anywhere with QR-based tracking and location IDs
+- **NIIMBOT D101/B1 Support**: Direct or manual printing to NIIMBOT thermal label printers
+- **Location/Shelf QR Codes**: Generate location labels with matching QR codes
 
 ## Hardware Support
 
@@ -148,6 +151,8 @@ VaultKeeper includes built-in audio transcription using OpenAI's Whisper:
 See the [docs](docs/) directory for detailed documentation:
 
 - [System Overview](docs/system-overview.md)
+- [Physical Storage System](docs/location-system/shelf-organization.md)
+- [NIIMBOT Printer Guide](docs/location-system/niimbot-instructions.md)
 - [Old Implementation Plans](docs/old/)
 
 ## License
