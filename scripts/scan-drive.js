@@ -21,7 +21,7 @@ const {
   scanDrive, 
   searchAssets,
   generateAssetReport 
-} = require('./drive-controller');
+} = require('../src/backend/controllers/drive-controller');
 const { getDriveInformation } = require('./util-functions');
 
 // Configure commander

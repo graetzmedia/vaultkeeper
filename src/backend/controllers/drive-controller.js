@@ -14,12 +14,12 @@ const {
   getDeviceFromMountPath,
   getDiskHealthInfo,
   generateThumbnail
-} = require('./util-functions');
+} = require('../utils/util-functions');
 
-// Import the models (assuming these exist in the project structure)
-const StorageDrive = require('../src/backend/models/storageDrive');
-const MediaAsset = require('../src/backend/models/mediaAsset');
-const Project = require('../src/backend/models/project');
+// Import the models
+const StorageDrive = require('../models/storageDrive');
+const MediaAsset = require('../models/mediaAsset');
+const Project = require('../models/project');
 
 /**
  * Register a new storage drive

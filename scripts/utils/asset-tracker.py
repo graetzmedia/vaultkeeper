@@ -62,6 +62,7 @@ def init_db():
         checksum TEXT,
         mime_type TEXT,
         media_info TEXT,
+        thumbnail_path TEXT,
         FOREIGN KEY (drive_id) REFERENCES drives (id)
     )
     ''')
@@ -208,13 +209,106 @@ def get_media_info(file_path):
         # ffprobe not installed
         return None
 
+def generate_video_thumbnail(video_path, output_dir=None, width=320, height=240):
+    """
+    Generate a thumbnail from a video file by extracting a frame from the middle
+    
+    Args:
+        video_path: Path to the video file
+        output_dir: Directory to save thumbnail (defaults to media-asset-tracker/thumbnails)
+        width: Thumbnail width
+        height: Thumbnail height
+        
+    Returns:
+        Path to the generated thumbnail or None if failed
+    """
+    try:
+        # Check if ffmpeg is available
+        subprocess.run(
+            ["ffmpeg", "-version"], 
+            capture_output=True, 
+            check=True
+        )
+        
+        # Get video duration using ffprobe
+        duration_result = subprocess.run(
+            [
+                "ffprobe", 
+                "-v", "error", 
+                "-show_entries", "format=duration", 
+                "-of", "default=noprint_wrappers=1:nokey=1", 
+                video_path
+            ],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        
+        try:
+            duration = float(duration_result.stdout.strip())
+        except (ValueError, TypeError):
+            # If duration cannot be determined, assume 30 seconds
+            duration = 30.0
+        
+        # Calculate the middle point
+        middle_time = duration / 2
+        
+        # Create thumbnails directory if it doesn't exist
+        if output_dir is None:
+            output_dir = os.path.expanduser("~/media-asset-tracker/thumbnails")
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Generate unique thumbnail filename
+        file_basename = os.path.basename(video_path)
+        thumbnail_name = f"{os.path.splitext(file_basename)[0]}_{uuid.uuid4().hex[:8]}.jpg"
+        thumbnail_path = os.path.join(output_dir, thumbnail_name)
+        
+        # Extract the frame
+        subprocess.run(
+            [
+                "ffmpeg", 
+                "-y",  # Overwrite output files
+                "-ss", str(middle_time),  # Seek to middle position
+                "-i", video_path,  # Input file
+                "-vframes", "1",  # Extract one frame
+                "-q:v", "2",  # Quality (2 is high, 31 is low)
+                "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",  # Scale and pad
+                thumbnail_path  # Output file
+            ],
+            capture_output=True,
+            check=True
+        )
+        
+        return thumbnail_path
+    except subprocess.CalledProcessError as e:
+        print(f"Error generating thumbnail: {e}")
+        return None
+    except FileNotFoundError:
+        # ffmpeg not installed
+        print("ffmpeg not found - thumbnail generation skipped")
+        return None
+    except Exception as e:
+        print(f"Unexpected error generating thumbnail: {e}")
+        return None
+
 def catalog_files(drive_info, conn=None):
     """Catalog all files on the drive and store in database"""
     if conn is None:
         conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
+    print("\n=== CATALOGING PROCESS STARTED ===")
+    print(f"Drive: {drive_info['volume_name']}")
+    print(f"Mount Point: {drive_info['mount_point']}")
+    print(f"Size: {drive_info['size_bytes'] / (1024**3):.2f} GB")
+    print(f"Format: {drive_info['format']}")
+    print(f"Label: {drive_info.get('label', drive_info['volume_name'])}")
+    print(f"Drive ID: {drive_info['id']}")
+    print("=================================\n")
+    
     # First, add the drive info to the database
+    print("Adding drive information to database...")
     cursor.execute('''
     INSERT OR REPLACE INTO drives (
         id, volume_name, size_bytes, free_bytes, format, mount_point, date_cataloged, label
@@ -229,30 +323,76 @@ def catalog_files(drive_info, conn=None):
         drive_info["date_cataloged"],
         drive_info.get("label", drive_info["volume_name"])
     ))
+    conn.commit()
+    print("Drive information added successfully")
     
-    # Catalog all files recursively
-    mount_point = drive_info["mount_point"]
+    # Initialize counters for analytics
+    start_time = datetime.datetime.now()
     total_files = 0
+    file_types = {}
+    total_size = 0
+    error_count = 0
+    skipped_count = 0
+    
+    # Count total files for progress reporting
+    print("\nCounting files (initial scan)...")
+    file_count = 0
+    for root, dirs, files in os.walk(drive_info["mount_point"]):
+        file_count += len(files)
+        # Remove hidden directories to speed up scan
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+    print(f"Found approximately {file_count} files to process")
+    
+    # Progress tracking
+    print("\nStarting file cataloging...")
+    mount_point = drive_info["mount_point"]
+    
+    # Set up progress display
+    last_update = datetime.datetime.now()
+    update_interval = datetime.timedelta(seconds=1)  # Update every second
     
     for root, dirs, files in os.walk(mount_point):
+        # Skip hidden directories
+        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        
+        current_dir = os.path.relpath(root, mount_point)
+        if current_dir == ".":
+            current_dir = "/"
+        
+        # Show current directory less frequently
+        now = datetime.datetime.now()
+        if now - last_update > update_interval:
+            print(f"\rProcessing directory: {current_dir:<60}", end="", flush=True)
+            last_update = now
+        
         for filename in files:
             file_path = os.path.join(root, filename)
             rel_path = os.path.relpath(file_path, mount_point)
             
             # Skip system files
             if any(part.startswith('.') for part in rel_path.split(os.path.sep)):
+                skipped_count += 1
                 continue
                 
             try:
                 # Get file stats
                 file_stats = os.stat(file_path)
                 file_size = file_stats.st_size
+                total_size += file_size
                 file_created = datetime.datetime.fromtimestamp(file_stats.st_ctime).isoformat()
                 file_modified = datetime.datetime.fromtimestamp(file_stats.st_mtime).isoformat()
                 
                 # Get file extension and MIME type
                 _, extension = os.path.splitext(filename)
                 extension = extension.lower().lstrip('.')
+                
+                # Update file type statistics
+                if extension in file_types:
+                    file_types[extension]["count"] += 1
+                    file_types[extension]["size"] += file_size
+                else:
+                    file_types[extension] = {"count": 1, "size": file_size}
+                
                 mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
                 
                 # Calculate checksum for small to medium files
@@ -260,17 +400,35 @@ def catalog_files(drive_info, conn=None):
                 if file_size < 500_000_000:  # Skip files larger than 500MB
                     checksum = calculate_checksum(file_path)
                 
-                # Extract media info for media files
+                # Extract media info and generate thumbnail for video files
                 media_info = None
-                if mime_type and (mime_type.startswith("video/") or mime_type.startswith("audio/")):
+                thumbnail_path = None
+                
+                if mime_type and mime_type.startswith("video/"):
+                    # Extract media metadata
                     media_info = get_media_info(file_path)
+                    if media_info:
+                        print(f"\nExtracted media info for: {rel_path}")
+                    
+                    # Generate thumbnail from video
+                    thumbnail_dir = os.path.expanduser(f"~/media-asset-tracker/thumbnails/{drive_info['id']}")
+                    thumbnail_path = generate_video_thumbnail(file_path, thumbnail_dir)
+                    if thumbnail_path:
+                        print(f"\nGenerated thumbnail for: {rel_path}")
+                
+                # Extract media info for audio files
+                elif mime_type and mime_type.startswith("audio/"):
+                    media_info = get_media_info(file_path)
+                    if media_info:
+                        print(f"\nExtracted media info for: {rel_path}")
                 
                 # Store file info in database
                 cursor.execute('''
                 INSERT OR REPLACE INTO files (
                     id, drive_id, path, filename, extension, size_bytes, 
-                    date_created, date_modified, checksum, mime_type, media_info
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    date_created, date_modified, checksum, mime_type, media_info,
+                    thumbnail_path
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     str(uuid.uuid4()),
                     drive_info["id"],
@@ -282,19 +440,73 @@ def catalog_files(drive_info, conn=None):
                     file_modified,
                     checksum,
                     mime_type,
-                    media_info
+                    media_info,
+                    thumbnail_path
                 ))
                 
                 total_files += 1
+                
+                # Update progress every 100 files
+                if total_files % 100 == 0:
+                    progress = total_files / file_count * 100 if file_count > 0 else 0
+                    elapsed = (datetime.datetime.now() - start_time).total_seconds()
+                    files_per_sec = total_files / elapsed if elapsed > 0 else 0
+                    
+                    # Clear previous line and print updated progress
+                    print(f"\rProgress: {total_files}/{file_count} files ({progress:.1f}%) | {files_per_sec:.1f} files/sec | {total_size/(1024**3):.2f} GB indexed", end="", flush=True)
+                
+                # Commit every 1000 files to avoid huge transactions
                 if total_files % 1000 == 0:
-                    print(f"Cataloged {total_files} files...")
-                    conn.commit()  # Commit every 1000 files to avoid huge transactions
+                    conn.commit()
                 
             except Exception as e:
-                print(f"Error processing file {file_path}: {e}")
+                error_count += 1
+                print(f"\nError processing file {rel_path}: {e}")
     
+    # Final commit
     conn.commit()
-    print(f"Cataloging complete. Processed {total_files} files.")
+    
+    # Calculate summary statistics
+    elapsed_time = (datetime.datetime.now() - start_time).total_seconds()
+    files_per_second = total_files / elapsed_time if elapsed_time > 0 else 0
+    
+    # Sort file types by count
+    sorted_types = sorted(file_types.items(), key=lambda x: x[1]["count"], reverse=True)
+    
+    # Count video/audio files and thumbnails
+    video_count = 0
+    audio_count = 0
+    thumbnail_count = 0
+    
+    try:
+        cursor.execute("SELECT COUNT(*) FROM files WHERE mime_type LIKE 'video/%' AND drive_id = ?", (drive_info["id"],))
+        video_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM files WHERE mime_type LIKE 'audio/%' AND drive_id = ?", (drive_info["id"],))
+        audio_count = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM files WHERE thumbnail_path IS NOT NULL AND drive_id = ?", (drive_info["id"],))
+        thumbnail_count = cursor.fetchone()[0]
+    except Exception as e:
+        print(f"Error counting media files: {e}")
+    
+    # Print detailed summary
+    print("\n\n=== CATALOGING SUMMARY ===")
+    print(f"Total files processed: {total_files}")
+    print(f"Total data size: {total_size/(1024**3):.2f} GB")
+    print(f"Processing time: {elapsed_time:.2f} seconds")
+    print(f"Processing rate: {files_per_second:.2f} files/second")
+    print(f"Media files found: {video_count} videos, {audio_count} audio files")
+    print(f"Thumbnails generated: {thumbnail_count}")
+    print(f"Errors encountered: {error_count}")
+    print(f"Files skipped: {skipped_count}")
+    
+    print("\nTop file types:")
+    for i, (ext, stats) in enumerate(sorted_types[:10], 1):
+        ext_name = f".{ext}" if ext else "(no extension)"
+        print(f"{i}. {ext_name}: {stats['count']} files ({stats['size']/(1024**3):.2f} GB)")
+    
+    print("\nCataloging complete!")
     return total_files
 
 def generate_qr_code(drive_info, label=None):
