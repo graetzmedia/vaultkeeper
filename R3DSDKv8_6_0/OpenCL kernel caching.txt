@@ -1,0 +1,40 @@
+The first time an application decodes an R3D frame using the OpenCL pipeline
+can result in delays, up to several minutes in some cases. This is
+particularly noticeable on AMD GPUs but has also been observed on some NVidia
+and Intel platforms.
+
+This decode delay happens because the OpenCL driver is compiling the R3D
+decode kernels. This can result in all OpenCL operations, not just from the
+R3D SDK, to be blocked. Below is a list of steps to mitigate this delay and
+avoid the appearance of the application hanging or processing to time out. 
+
+Step 1: use the SDK’s compiled kernel cache folder feature. When instantiating
+the REDCL class the second parameter to the constructor,
+compiledKernelCacheFolder, should be set to a local non-temporary path. The
+SDK will store kernels it compiles for the selected GPU in the specified
+location, and re-use them in the future without needing to compile them again.
+This will significantly speed up first frame decode times. 
+
+Step 2: pre-compile the kernels ahead of time using the same kernel cache
+folder as step 1. To do this, instantiate the REDCL class pointing to the same
+cache folder as in step 1 and call the checkCompatability() function on the
+class instance to start the kernel compilation. The REDCL destructor will wait
+for this process to finish. 
+
+Due to this process potentially taking multiple minutes we recommend
+indicating this caching is happening in your UI, so the user does not think
+the application is hanging. This process will need to be repeated when the
+user changes GPUs or the R3D SDK shipped is updated. 
+
+Some options to consider for when to run this task:
+
+  1) As part of the setup process when the user is installing the application.
+     If any changes listed above happen the user will incur a one-time delay
+	 on the first decode. 
+
+  2) The first time the application is executed after installation. If any
+     changes listed above happen this process should be repeated.
+
+  3) Every time the application is executed as part of the application's
+     initialization. The several minute delay will only happen if anything
+	 changed or this is a first run.

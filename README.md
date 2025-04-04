@@ -1,67 +1,85 @@
 # VaultKeeper
 
-## Overview
-VaultKeeper is a comprehensive media asset tracking solution designed for video production archives. It helps media professionals track, catalog, and manage production files once they're archived off active servers and production drives.
+VaultKeeper is a comprehensive system for cataloging, organizing, and tracking media storage drives with an emphasis on data integrity and physical organization.
 
-## Purpose
-When video production projects are completed, valuable media assets often get archived to offline storage, making them difficult to locate and access later. VaultKeeper solves this problem by providing a complete system for cataloging, tracking, and quickly retrieving archived media assets.
+## Features
 
-## Key Features
+- **Drive Cataloging**: Scan and inventory entire drives, tracking all files and metadata
+- **Media Asset Database**: Searchable database of all files with detailed metadata
+- **Video Thumbnails**: Generate thumbnails from video files (supports MP4, MOV, MXF, R3D)
+- **QR Code Labels**: Create and print custom QR code labels for drives using NIIMBOT printers
+- **Drive Health Monitoring**: Comprehensive tests for drives that have been in storage
+- **Location Management**: Track physical shelf locations and drive check-out/check-in
+- **Native Interface**: CLI-focused design with optional GTK GUI for browsing
 
-### Media Asset Cataloging
-- **Comprehensive Metadata**: Track detailed information about each media asset
-- **Content Tagging**: Organize assets with customizable tags and categories
-- **Project Association**: Link assets to specific productions and clients
-- **Automated Scanning**: Extract metadata from media files when possible
+## Hardware Support
 
-### Storage Tracking
-- **Drive Management**: Track which assets are stored on which physical drives
-- **Location Tracking**: Know exactly where each physical drive is stored
-- **QR Code System**: Generate and print QR codes for drives with NIIMBOT printer
-- **Quick Scanning**: Find any drive or asset instantly with a quick scan
+- **Storage**: Compatible with the Orico 5-bay SATA dock and standard USB drives
+- **Printing**: Support for NIIMBOT B1 (20-50mm) and D101 (10-25mm) label printers
+- **Scanning**: Integration with Eyoyo 2D/1D wireless barcode/QR scanner
 
-### Archive Management
-- **Archive Planning**: Create structured archive plans for projects
-- **Retrieval System**: Simplified process for finding and restoring archived content
-- **Chain of Custody**: Track who checks out and returns physical media
-- **Storage Statistics**: Monitor capacity and usage across all storage media
+## Requirements
 
-### Search and Retrieval
-- **Advanced Search**: Find assets based on any combination of metadata
-- **Preview Generation**: View thumbnails or proxies of archived content
-- **Export Functionality**: Generate reports of archived assets by project or drive
-- **Batch Operations**: Perform actions on multiple assets simultaneously
+- **Operating System**: Ubuntu/Linux
+- **Dependencies**:
+  - Python 3.8+
+  - SQLite 3
+  - ffmpeg (for video thumbnail generation)
+  - Optional: RED SDK (for R3D file support)
 
-## Technical Architecture
+## Project Structure
 
-### Backend
-- Node.js/Express API
-- MongoDB database
-- Media processing modules for metadata extraction
+```
+vaultkeeper/
+├── docs/              # Documentation
+│   ├── next-steps.md  # Planned features and improvements
+│   └── old/           # Archive of planning documents
+├── R3DSDKv8_6_0/      # RED SDK for R3D file support
+├── scripts/           # Installation and utility scripts
+│   ├── install.sh     # Main installation script
+│   └── utils/         # Utility scripts for specific tasks
+├── src/               # Source code
+│   ├── cli/           # Command-line interface
+│   ├── core/          # Core functionality (database, models)
+│   ├── hardware/      # Hardware integrations (printers, scanners)
+│   ├── health/        # Drive health checking
+│   ├── media/         # Media processing (thumbnails)
+│   └── utils/         # Utilities (QR code generation)
+└── tests/             # Unit and integration tests
+```
 
-### Frontend
-- React with Material UI components
-- Mobile-responsive design for warehouse/storage use
+## Quick Start
+
+```bash
+# Install VaultKeeper
+./scripts/install.sh
+
+# Catalog a drive
+vaultkeeper catalog /media/external/drive1
+
+# Search for files
+vaultkeeper search "interview 2023"
+
+# Generate drive labels
+vaultkeeper label generate drive 51fc9a3d
+
+# Check drive health
+vaultkeeper health quick /dev/sdb
+```
+
+## RED SDK Integration
+
+VaultKeeper includes the RED SDK v8.6.0 for R3D file support. See [next-steps.md](docs/next-steps.md) for implementation details.
 
 ## Documentation
 
-Detailed documentation is available in the docs directory:
-- [System Overview](docs/system-overview.md) (Coming soon)
-- [Implementation Guide](docs/implementation-guide.md) (Coming soon)
+See the [docs](docs/) directory for detailed documentation:
 
-## Setup
-
-### Prerequisites
-- Node.js (v14+)
-- MongoDB
-- NIIMBOT label printer (optional, for QR codes)
-
-### Installation
-1. Clone this repository
-2. Install dependencies with `npm install` 
-3. Configure MongoDB connection in `config.js`
-4. Start the server with `npm start`
-5. The application will be available at http://localhost:5001
+- [User Guide](docs/user-guide.md)
+- [CLI Reference](docs/cli-reference.md)
+- [Drive Health Checking](docs/drive-health.md)
+- [Hardware Setup](docs/hardware-setup.md)
 
 ## License
-All rights reserved.
+
+This project is licensed under the MIT License - see the LICENSE file for details.
