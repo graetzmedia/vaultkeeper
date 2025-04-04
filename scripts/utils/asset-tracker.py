@@ -164,13 +164,28 @@ def check_for_duplicate_drive(volume_name, mount_point, size_bytes, conn=None):
     
     return None
 
-def handle_duplicate_drive(duplicate_drives, new_drive_info):
+def handle_duplicate_drive(duplicate_drives, new_drive_info, batch_mode=False, default_choice=None):
     """
     Handle duplicate drive entries - interactive mode to merge or replace
-    Returns updated drive_info to use
+    
+    Args:
+        duplicate_drives: List of duplicate drive entries found in database
+        new_drive_info: Information about the new drive being cataloged
+        batch_mode: If True, indicates we're running in batch mode (affects output)
+        default_choice: In batch mode, a predetermined choice to use (1=replace, 2=new, 3=skip)
+    
+    Returns:
+        updated drive_info to use, or None to skip this drive
     """
-    print("\n==== DUPLICATE DRIVE DETECTED ====")
-    print(f"The drive '{new_drive_info['volume_name']}' has been cataloged before.")
+    drive_name = new_drive_info['volume_name']
+    mount_point = new_drive_info.get('mount_point', 'Unknown')
+    
+    if batch_mode:
+        print(f"\n==== DUPLICATE DRIVE DETECTED: {drive_name} ({mount_point}) ====")
+    else:
+        print("\n==== DUPLICATE DRIVE DETECTED ====")
+        print(f"The drive '{drive_name}' has been cataloged before.")
+    
     print(f"Found {len(duplicate_drives)} previous entries:")
     
     for i, drive in enumerate(duplicate_drives):
@@ -190,28 +205,39 @@ def handle_duplicate_drive(duplicate_drives, new_drive_info):
         print(f"   Files: {get_file_count_for_drive(drive.get('id'))}")
         print()
     
-    print("Options:")
-    print("1) Replace one of the existing entries (keeps the same drive ID)")
-    print("2) Create a new entry (will result in duplicate entries)")
-    print("3) Cancel operation")
-    
-    choice = input("\nYour choice (1-3): ").strip()
+    # If we have a default choice in batch mode, use it
+    if batch_mode and default_choice:
+        choice = str(default_choice)
+        print(f"Using predetermined choice in batch mode: {choice}")
+    else:
+        # Interactive selection
+        print("Options:")
+        print("1) Replace one of the existing entries (keeps the same drive ID)")
+        print("2) Create a new entry (will result in duplicate entries)")
+        print("3) " + ("Skip this drive" if batch_mode else "Cancel operation"))
+        
+        choice = input("\nYour choice (1-3): ").strip()
     
     if choice == "1":
         if len(duplicate_drives) == 1:
             drive_to_replace = duplicate_drives[0]
         else:
-            replace_idx = input(f"Which entry to replace (1-{len(duplicate_drives)}): ").strip()
-            try:
-                idx = int(replace_idx) - 1
-                if 0 <= idx < len(duplicate_drives):
-                    drive_to_replace = duplicate_drives[idx]
-                else:
-                    print("Invalid selection, creating new entry")
+            if batch_mode and default_choice:
+                # In batch mode with a default choice, always use the first entry for simplicity
+                drive_to_replace = duplicate_drives[0]
+                print(f"Using first entry (ID: {drive_to_replace['id']}) in batch mode")
+            else:
+                replace_idx = input(f"Which entry to replace (1-{len(duplicate_drives)}): ").strip()
+                try:
+                    idx = int(replace_idx) - 1
+                    if 0 <= idx < len(duplicate_drives):
+                        drive_to_replace = duplicate_drives[idx]
+                    else:
+                        print("Invalid selection, creating new entry")
+                        return new_drive_info
+                except ValueError:
+                    print("Invalid input, creating new entry")
                     return new_drive_info
-            except ValueError:
-                print("Invalid input, creating new entry")
-                return new_drive_info
         
         # Keep the existing ID and add any custom label that was previously set
         new_drive_info["id"] = drive_to_replace["id"]
@@ -222,8 +248,14 @@ def handle_duplicate_drive(duplicate_drives, new_drive_info):
             else:
                 print(f"Keeping new label: {new_drive_info['label']}")
         
-        # Clear existing files (optional - confirm with user)
-        clear_files = input("Clear existing files for this drive? (y/n): ").strip().lower()
+        # Clear existing files (optional - confirm with user unless in batch mode)
+        if batch_mode and default_choice:
+            # In automatic batch mode, don't clear files by default for safety
+            clear_files = 'n'
+            print("Batch mode: Keeping existing files (safer option)")
+        else:
+            clear_files = input("Clear existing files for this drive? (y/n): ").strip().lower()
+            
         if clear_files == 'y':
             delete_files_for_drive(drive_to_replace["id"])
             print(f"Deleted existing files for drive {drive_to_replace['id']}")
@@ -238,7 +270,10 @@ def handle_duplicate_drive(duplicate_drives, new_drive_info):
         return new_drive_info
     
     else:  # choice == "3" or any other input
-        print("Canceling operation")
+        if batch_mode:
+            print(f"Skipping drive: {drive_name}")
+        else:
+            print("Canceling operation")
         return None
 
 def get_file_count_for_drive(drive_id):
@@ -265,8 +300,18 @@ def delete_files_for_drive(drive_id):
     except Exception as e:
         print(f"Error deleting files: {e}")
 
-def get_drive_info(mount_point):
-    """Get drive information at the specified mount point"""
+def get_drive_info(mount_point, batch_mode=False, duplicate_choice=None):
+    """
+    Get drive information at the specified mount point
+    
+    Args:
+        mount_point: Mount point of the drive
+        batch_mode: Whether we're running in batch mode (affects duplicate handling)
+        duplicate_choice: In batch mode, how to handle duplicates (1=replace, 2=new, 3=skip)
+    
+    Returns:
+        Drive info dictionary or None if canceled/skipped
+    """
     if not os.path.exists(mount_point):
         print(f"Error: Mount point {mount_point} does not exist")
         return None
@@ -331,8 +376,13 @@ def get_drive_info(mount_point):
     # Check for duplicates
     duplicates = check_for_duplicate_drive(volume_name, mount_point, size_bytes)
     if duplicates:
-        # Handle duplicates (via user interaction)
-        updated_info = handle_duplicate_drive(duplicates, drive_info)
+        # Handle duplicates (via user interaction or using batch defaults)
+        updated_info = handle_duplicate_drive(
+            duplicates, 
+            drive_info,
+            batch_mode=batch_mode,
+            default_choice=duplicate_choice
+        )
         return updated_info
     
     return drive_info
@@ -500,8 +550,37 @@ def generate_r3d_thumbnail(r3d_path, output_dir=None, width=320, height=240):
     # For now, we'll use ffmpeg which works with most R3D files
     print(f"Generating thumbnail for R3D file: {r3d_path}")
     print("Using ffmpeg for R3D thumbnails (RED SDK integration pending)")
+    
     try:
-        return generate_video_thumbnail_with_ffmpeg(r3d_path, output_dir, width, height)
+        # Create output directory if it doesn't exist
+        if output_dir is None:
+            output_dir = os.path.expanduser("~/media-asset-tracker/thumbnails")
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Generate unique thumbnail filename
+        file_basename = os.path.basename(r3d_path)
+        thumbnail_name = f"{os.path.splitext(file_basename)[0]}_{uuid.uuid4().hex[:8]}.jpg"
+        thumbnail_path = os.path.join(output_dir, thumbnail_name)
+        
+        # Try to extract a frame using ffmpeg
+        subprocess.run(
+            [
+                "ffmpeg", 
+                "-y",  # Overwrite output files
+                "-i", r3d_path,  # Input file
+                "-vframes", "1",  # Extract one frame
+                "-q:v", "2",  # Quality (2 is high, 31 is low)
+                "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",  # Scale and pad
+                thumbnail_path  # Output file
+            ],
+            capture_output=True,
+            check=True
+        )
+        
+        print(f"Successfully created R3D thumbnail: {thumbnail_path}")
+        return thumbnail_path
+        
     except Exception as e:
         print(f"Error generating R3D thumbnail: {e}")
         return None
@@ -752,6 +831,7 @@ def catalog_files(drive_info, conn=None):
     total_size = 0
     error_count = 0
     skipped_count = 0
+    r3d_count = 0  # Counter for .r3d files
     
     # Count total files for progress reporting
     print("\nCounting files (initial scan)...")
@@ -816,7 +896,19 @@ def catalog_files(drive_info, conn=None):
                 else:
                     file_types[extension] = {"count": 1, "size": file_size}
                 
-                mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
+                # Check specifically for .r3d files
+                is_r3d = extension.lower() == 'r3d'
+                if is_r3d:
+                    r3d_count += 1
+                    # Print a message every 10 r3d files
+                    if r3d_count % 10 == 0:
+                        print(f"\nProcessed {r3d_count} R3D files so far. Current: {rel_path}")
+                
+                # Determine MIME type with special handling for R3D files
+                if is_r3d:
+                    mime_type = "video/x-red-r3d"
+                else:
+                    mime_type = mimetypes.guess_type(file_path)[0] or "application/octet-stream"
                 
                 # Calculate checksum for small to medium files
                 checksum = None
@@ -827,7 +919,8 @@ def catalog_files(drive_info, conn=None):
                 media_info = None
                 thumbnail_path = None
                 
-                if mime_type and mime_type.startswith("video/"):
+                # Process any video file (including .r3d)
+                if is_r3d or (mime_type and mime_type.startswith("video/")):
                     # Extract media metadata
                     media_info = get_media_info(file_path)
                     if media_info:
@@ -835,7 +928,13 @@ def catalog_files(drive_info, conn=None):
                     
                     # Generate thumbnail from video
                     thumbnail_dir = os.path.expanduser(f"~/media-asset-tracker/thumbnails/{drive_info['id']}")
-                    thumbnail_path = generate_video_thumbnail(file_path, thumbnail_dir)
+                    
+                    # Use R3D-specific handling for .r3d files
+                    if is_r3d:
+                        thumbnail_path = generate_r3d_thumbnail(file_path, thumbnail_dir)
+                    else:
+                        thumbnail_path = generate_video_thumbnail(file_path, thumbnail_dir)
+                        
                     if thumbnail_path:
                         print(f"\nGenerated thumbnail for: {rel_path}")
                 
@@ -911,8 +1010,13 @@ def catalog_files(drive_info, conn=None):
         
         cursor.execute("SELECT COUNT(*) FROM files WHERE thumbnail_path IS NOT NULL AND drive_id = ?", (drive_info["id"],))
         thumbnail_count = cursor.fetchone()[0]
+        
+        # Get R3D file count for summary
+        cursor.execute("SELECT COUNT(*) FROM files WHERE extension = 'r3d' AND drive_id = ?", (drive_info["id"],))
+        r3d_db_count = cursor.fetchone()[0]
     except Exception as e:
         print(f"Error counting media files: {e}")
+        r3d_db_count = r3d_count  # Use our running counter
     
     # Print detailed summary
     print("\n\n=== CATALOGING SUMMARY ===")
@@ -921,6 +1025,7 @@ def catalog_files(drive_info, conn=None):
     print(f"Processing time: {elapsed_time:.2f} seconds")
     print(f"Processing rate: {files_per_second:.2f} files/second")
     print(f"Media files found: {video_count} videos, {audio_count} audio files")
+    print(f"RED R3D files found: {r3d_db_count}")
     print(f"Thumbnails generated: {thumbnail_count}")
     print(f"Errors encountered: {error_count}")
     print(f"Files skipped: {skipped_count}")
@@ -962,10 +1067,46 @@ def generate_qr_code(drive_info, label=None):
     # Add label text below QR code
     label_text = label or drive_info["volume_name"]
     
+    # Convert the QR code to a PIL Image if it's not already
+    if not isinstance(img, Image.Image):
+        print("Converting QR code to PIL Image")
+        img_data = img.get_image()
+        if hasattr(img_data, 'convert'):
+            img = img_data.convert('RGB')
+        else:
+            # If we can't get a proper Image object, create a new one from scratch
+            print("Creating new QR code image from scratch")
+            qr.make()
+            img = qr.make_image(fill_color="black", back_color="white").get_image()
+    
+    # Get the size of the image
+    try:
+        width, height = img.size
+        print(f"QR code size: {width}x{height}")
+    except AttributeError as e:
+        print(f"Error getting image size: {e}")
+        # Default size as fallback
+        width, height = 200, 200
+    
     # Create a new image with space for text
-    width, height = img.size
     new_img = Image.new('RGB', (width, height + 60), color='white')
-    new_img.paste(img, (0, 0))
+    
+    # Use a more reliable method to paste the image
+    try:
+        new_img.paste(img, (0, 0))
+    except ValueError as e:
+        print(f"Error during paste operation: {e}")
+        # Alternative paste method
+        try:
+            # Convert to RGB if needed
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            region = img.crop((0, 0, width, height))
+            new_img.paste(region, (0, 0, width, height))
+        except Exception as e2:
+            print(f"Alternative paste method failed: {e2}")
+            # Last resort - just use the QR code without the label
+            new_img = img
     
     # Add text
     draw = ImageDraw.Draw(new_img)
@@ -974,13 +1115,20 @@ def generate_qr_code(drive_info, label=None):
     except IOError:
         font = ImageFont.load_default()
     
-    draw.text(
-        (width // 2, height + 30),
-        label_text,
-        fill='black',
-        font=font,
-        anchor="mm"
-    )
+    # If using a very old version of PIL, anchor may not be supported
+    try:
+        draw.text(
+            (width // 2, height + 30),
+            label_text,
+            fill='black',
+            font=font,
+            anchor="mm"
+        )
+    except TypeError:
+        # Older versions of PIL don't support anchor
+        text_size = draw.textsize(label_text, font=font)
+        position = ((width - text_size[0]) // 2, height + 30 - text_size[1] // 2)
+        draw.text(position, label_text, fill='black', font=font)
     
     # Save image
     os.makedirs(os.path.expanduser("~/media-asset-tracker/qr-codes"), exist_ok=True)
@@ -997,6 +1145,7 @@ def generate_qr_code(drive_info, label=None):
     conn.commit()
     conn.close()
     
+    print(f"QR code generated successfully: {qr_path}")
     return qr_path
 
 def search_files(query, search_type="filename"):
@@ -1508,6 +1657,17 @@ def main():
         action="store_true",
         help="Run transcription after cataloging"
     )
+    catalog_parser.add_argument(
+        "--batch-mode",
+        action="store_true",
+        help="Run in batch mode (less interactive)"
+    )
+    catalog_parser.add_argument(
+        "--duplicate-choice",
+        type=int,
+        choices=[1, 2, 3],
+        help="How to handle duplicate drives in batch mode (1=replace, 2=new, 3=skip)"
+    )
     
     # Generate QR code
     qr_parser = subparsers.add_parser("qr", help="Generate QR code for a drive")
@@ -1633,7 +1793,14 @@ def main():
         
     elif args.command == "catalog":
         print(f"Cataloging drive at {args.mount_point}...")
-        drive_info = get_drive_info(args.mount_point)
+        
+        # Get drive info with batch mode handling if specified
+        drive_info = get_drive_info(
+            args.mount_point,
+            batch_mode=args.batch_mode,
+            duplicate_choice=args.duplicate_choice
+        )
+        
         if drive_info:
             if args.label:
                 drive_info["label"] = args.label
@@ -1642,8 +1809,12 @@ def main():
             print(f"Cataloged {total_files} files from {drive_info['volume_name']}")
             
             # Generate QR code
-            qr_path = generate_qr_code(drive_info, args.label)
-            print(f"QR code generated: {qr_path}")
+            try:
+                qr_path = generate_qr_code(drive_info, args.label)
+                print(f"QR code generated: {qr_path}")
+            except Exception as e:
+                print(f"Warning: Error generating QR code: {e}")
+                print("Continuing with processing...")
             
             # Run transcription if requested
             if args.transcribe:

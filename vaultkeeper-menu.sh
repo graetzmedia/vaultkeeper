@@ -304,6 +304,10 @@ batch_catalog_drives() {
   echo "Detecting mounted drives..."
   MOUNTED_DRIVES=()
   DRIVE_LABELS=()
+  CUSTOM_LABELS=()  # Array to store user-defined labels
+  ENABLE_TRANSCRIPTION=0  # Global flag for transcription
+  DUPLICATES_CHOICE=1  # Default choice for duplicates (1=replace, 2=create new, 3=skip)
+  PARALLEL=0  # Default to serial processing
   
   # Common media mount points
   MOUNT_POINTS=$(mount | grep "/media/" | awk '{print $3}')
@@ -369,28 +373,233 @@ batch_catalog_drives() {
     return
   fi
   
-  # Catalog each drive
+  # Ask about processing method (serial vs parallel)
+  echo
+  echo -e "${BLUE}Select cataloging method:${NC}"
+  echo "1) Serial cataloging (one drive at a time, safer)"
+  echo "2) Parallel cataloging (2 drives simultaneously, faster)"
+  read -e process_method
+  
+  # Set up parallel processing if selected
+  if [[ "$process_method" == "2" ]]; then
+    PARALLEL=1
+    echo "Selected parallel cataloging"
+  else
+    echo "Selected serial cataloging (default)"
+  fi
+  
+  # Ask about how to handle duplicate drives
+  echo
+  echo -e "${BLUE}How should duplicate drive entries be handled?${NC}"
+  echo "1) Replace existing entries (keeps same drive ID)"
+  echo "2) Create new entries (results in duplicates)"
+  echo "3) Skip duplicate drives (only catalog new drives)"
+  read -e duplicate_choice
+  
+  # Set default choice based on user input (default to 1 if invalid)
+  if [[ "$duplicate_choice" =~ ^[1-3]$ ]]; then
+    DUPLICATES_CHOICE=$duplicate_choice
+  else
+    echo "Invalid choice, using default (replace existing entries)"
+    DUPLICATES_CHOICE=1
+  fi
+  
+  # Ask about transcription for all drives
+  echo
+  echo -e "${BLUE}Enable audio transcription for all drives? (y/n):${NC}"
+  read -e do_transcribe
+  if [[ "$do_transcribe" =~ ^[Yy] ]]; then
+    ENABLE_TRANSCRIPTION=1
+    echo "Transcription enabled for all drives"
+  fi
+  
+  # Collect all labels first before starting the batch process
+  echo
+  echo -e "${YELLOW}Let's set up labels for all drives before processing:${NC}"
+  echo
+  
   for i in "${!MOUNTED_DRIVES[@]}"; do
     mount_point="${MOUNTED_DRIVES[$i]}"
     default_label="${DRIVE_LABELS[$i]}"
     
-    echo
-    echo -e "${BLUE}Enter label for $mount_point (default: $default_label):${NC}"
+    echo -e "$((i+1))) ${BLUE}Drive: $mount_point${NC}"
+    echo -e "   ${BLUE}Enter label for this drive (default: $default_label):${NC}"
     read -e custom_label
     
-    label=${custom_label:-$default_label}
+    if [ -z "$custom_label" ]; then
+      CUSTOM_LABELS+=("$default_label")
+      echo "   Using default label: $default_label"
+    else
+      CUSTOM_LABELS+=("$custom_label")
+      echo "   Using custom label: $custom_label"
+    fi
     
-    echo
-    echo "========================================="
-    echo "Cataloging drive at: $mount_point"
-    echo "Using label: $label"
-    echo "========================================="
-    
-    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label"
-    
-    echo "Finished cataloging $label"
     echo
   done
+  
+  # Confirm before starting the walkaway process
+  echo -e "${YELLOW}Ready to start walkaway batch processing for all drives.${NC}"
+  echo -e "${BLUE}Processing method: $([ "$PARALLEL" -eq 1 ] && echo "Parallel (2 drives at once)" || echo "Serial (one at a time)")${NC}"
+  echo -e "${BLUE}For duplicate drives: $([ "$DUPLICATES_CHOICE" -eq 1 ] && echo "Replace existing entries" || [ "$DUPLICATES_CHOICE" -eq 2 ] && echo "Create new entries" || echo "Skip drives")${NC}"
+  echo -e "${BLUE}Start processing? (y/n)${NC}"
+  read -e start_confirm
+  
+  if [[ ! "$start_confirm" =~ ^[Yy] ]]; then
+    echo "Operation canceled."
+    echo "Press Enter to continue..."
+    read
+    return
+  fi
+  
+  # Now process all drives in a walkaway batch
+  echo "Starting batch processing of all drives..."
+  echo
+  
+  # Create log directory
+  LOG_DIR="$HOME/vaultkeeper_logs"
+  mkdir -p "$LOG_DIR"
+  
+  # Build the batch flag for duplicate handling
+  BATCH_FLAGS="--batch-mode --duplicate-choice $DUPLICATES_CHOICE"
+  
+  if [ $PARALLEL -eq 1 ]; then
+    # Parallel processing (2 drives at a time)
+    i=0
+    while [ $i -lt ${#MOUNTED_DRIVES[@]} ]; do
+      # Process first drive
+      mount_point="${MOUNTED_DRIVES[$i]}"
+      label="${CUSTOM_LABELS[$i]}"
+      
+      echo
+      echo -e "${GREEN}==================================================${NC}"
+      echo -e "${BLUE}CATALOGING Drive #$((i+1)): $mount_point (Label: $label)${NC}"
+      if [ $ENABLE_TRANSCRIPTION -eq 1 ]; then
+        echo -e "${BLUE}Transcription: ENABLED${NC}"
+      else
+        echo -e "${BLUE}Transcription: DISABLED${NC}"
+      fi
+      echo -e "${GREEN}==================================================${NC}"
+      
+      # Create log file
+      LOG_FILE_1="$LOG_DIR/drive_$(echo "$mount_point" | tr '/' '_').log"
+      
+      # Start catalog in background
+      echo "Starting cataloging in background..."
+      echo "Logging output to: $LOG_FILE_1"
+      
+      if [ $ENABLE_TRANSCRIPTION -eq 1 ]; then
+        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t $BATCH_FLAGS > "$LOG_FILE_1" 2>&1) &
+      else
+        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" $BATCH_FLAGS > "$LOG_FILE_1" 2>&1) &
+      fi
+      CATALOG_PID_1=$!
+      
+      # Check if we have a second drive to process
+      j=$((i+1))
+      if [ $j -lt ${#MOUNTED_DRIVES[@]} ]; then
+        mount_point2="${MOUNTED_DRIVES[$j]}"
+        label2="${CUSTOM_LABELS[$j]}"
+        
+        echo
+        echo -e "${GREEN}==================================================${NC}"
+        echo -e "${BLUE}CATALOGING Drive #$((j+1)): $mount_point2 (Label: $label2)${NC}"
+        if [ $ENABLE_TRANSCRIPTION -eq 1 ]; then
+          echo -e "${BLUE}Transcription: ENABLED${NC}"
+        else
+          echo -e "${BLUE}Transcription: DISABLED${NC}"
+        fi
+        echo -e "${GREEN}==================================================${NC}"
+        
+        # Create second log file
+        LOG_FILE_2="$LOG_DIR/drive_$(echo "$mount_point2" | tr '/' '_').log"
+        
+        # Start second catalog in background
+        echo "Starting cataloging in background..."
+        echo "Logging output to: $LOG_FILE_2"
+        
+        if [ $ENABLE_TRANSCRIPTION -eq 1 ]; then
+          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" -t $BATCH_FLAGS > "$LOG_FILE_2" 2>&1) &
+        else
+          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" $BATCH_FLAGS > "$LOG_FILE_2" 2>&1) &
+        fi
+        CATALOG_PID_2=$!
+        
+        # Wait for both catalog processes to complete
+        echo "Waiting for both catalog processes to complete..."
+        wait $CATALOG_PID_1
+        echo "Catalog for Drive #$((i+1)) completed"
+        wait $CATALOG_PID_2
+        echo "Catalog for Drive #$((j+1)) completed"
+        
+        # Show logs
+        echo "Catalog log for Drive #$((i+1)):"
+        if [ -f "$LOG_FILE_1" ]; then
+          cat "$LOG_FILE_1"
+        else
+          echo "Log file not found"
+        fi
+        
+        echo "Catalog log for Drive #$((j+1)):"
+        if [ -f "$LOG_FILE_2" ]; then
+          cat "$LOG_FILE_2"
+        else
+          echo "Log file not found"
+        fi
+        
+        # Clean up log files
+        rm -f "$LOG_FILE_1" "$LOG_FILE_2"
+        
+        # Increment by 2 since we processed 2 drives
+        i=$((i+2))
+      else
+        # Only one drive left, process it normally
+        wait $CATALOG_PID_1
+        echo "Catalog log for Drive #$((i+1)):"
+        if [ -f "$LOG_FILE_1" ]; then
+          cat "$LOG_FILE_1"
+        else
+          echo "Log file not found"
+        fi
+        
+        # Clean up log file
+        rm -f "$LOG_FILE_1"
+        
+        # Increment counter
+        i=$((i+1))
+      fi
+    done
+  else
+    # Serial processing for cataloging
+    for i in "${!MOUNTED_DRIVES[@]}"; do
+      mount_point="${MOUNTED_DRIVES[$i]}"
+      label="${CUSTOM_LABELS[$i]}"
+      
+      echo
+      echo -e "${GREEN}==================================================${NC}"
+      echo -e "${BLUE}CATALOGING Drive #$((i+1)): $mount_point (Label: $label)${NC}"
+      if [ $ENABLE_TRANSCRIPTION -eq 1 ]; then
+        echo -e "${BLUE}Transcription: ENABLED${NC}"
+      else
+        echo -e "${BLUE}Transcription: DISABLED${NC}"
+      fi
+      echo -e "${GREEN}==================================================${NC}"
+      
+      # Catalog the drive with predetermined settings
+      echo "Starting cataloging..."
+      
+      if [ $ENABLE_TRANSCRIPTION -eq 1 ]; then
+        python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t $BATCH_FLAGS
+      else
+        python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" $BATCH_FLAGS
+      fi
+      
+      echo
+      echo -e "${GREEN}==================================================${NC}"
+      echo -e "${GREEN}Completed cataloging drive: $mount_point${NC}"
+      echo -e "${GREEN}==================================================${NC}"
+      echo
+    done
+  fi
   
   echo "All drives have been processed."
   echo "Press Enter to continue..."
@@ -567,6 +776,8 @@ full_process() {
   DRIVE_DEVS=()
   CUSTOM_LABELS=()
   SKIP_HEALTH_ARRAY=()
+  TRANSCRIBE_ARRAY=()
+  DUPLICATES_CHOICE=1  # Default choice for duplicates (1=replace, 2=create new, 3=skip)
   
   # Get all mount points in /media
   MOUNT_POINTS=$(mount | grep "/media/" | awk '{print $3}')
@@ -624,6 +835,26 @@ full_process() {
     return
   fi
   
+  # Check if any drives are already in database
+  echo "Checking for existing drives in database..."
+  python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" drives
+  
+  # Ask about how to handle duplicate drives
+  echo
+  echo -e "${BLUE}How should duplicate drive entries be handled?${NC}"
+  echo "1) Replace existing entries (keeps same drive ID)"
+  echo "2) Create new entries (results in duplicates)"
+  echo "3) Skip duplicate drives (only catalog new drives)"
+  read -e duplicate_choice
+  
+  # Set default choice based on user input (default to 1 if invalid)
+  if [[ "$duplicate_choice" =~ ^[1-3]$ ]]; then
+    DUPLICATES_CHOICE=$duplicate_choice
+  else
+    echo "Invalid choice, using default (replace existing entries)"
+    DUPLICATES_CHOICE=1
+  fi
+  
   # Ask for processing method for cataloging
   echo
   echo -e "${BLUE}Select cataloging method:${NC}"
@@ -640,9 +871,31 @@ full_process() {
     echo "Selected serial cataloging (default)"
   fi
   
-  # Collect all labels first
+  # Global transcription setting
   echo
-  echo -e "${YELLOW}Let's set up labels for all drives before processing:${NC}"
+  echo -e "${BLUE}Do you want to enable audio transcription for all drives? (y/n):${NC}"
+  read -e global_transcribe
+  ENABLE_GLOBAL_TRANSCRIPTION=0
+  
+  if [[ "$global_transcribe" =~ ^[Yy] ]]; then
+    ENABLE_GLOBAL_TRANSCRIPTION=1
+    echo "Transcription will be enabled for all drives"
+  else
+    echo
+    echo -e "${BLUE}Do you want to enable transcription for specific drives? (y/n):${NC}"
+    read -e specific_transcribe
+    if [[ "$specific_transcribe" =~ ^[Yy] ]]; then
+      SPECIFIC_TRANSCRIPTION=1
+      echo "You'll be asked about transcription for each drive individually"
+    else
+      SPECIFIC_TRANSCRIPTION=0
+      echo "Transcription will be disabled for all drives"
+    fi
+  fi
+  
+  # Collect all labels and drive-specific settings before processing
+  echo
+  echo -e "${YELLOW}Let's set up labels and settings for all drives before processing:${NC}"
   echo
   
   for i in "${!MOUNTED_DRIVES[@]}"; do
@@ -673,11 +926,31 @@ full_process() {
     done
     SKIP_HEALTH_ARRAY+=($SKIP_HEALTH)
     
+    # Individual transcription settings if not using global setting
+    if [ $ENABLE_GLOBAL_TRANSCRIPTION -eq 1 ]; then
+      TRANSCRIBE_ARRAY+=(1)
+      echo "   Transcription: ENABLED (global setting)"
+    elif [ $SPECIFIC_TRANSCRIPTION -eq 1 ]; then
+      echo -e "   ${BLUE}Enable audio transcription for this drive? (y/n):${NC}"
+      read -e drive_transcribe
+      if [[ "$drive_transcribe" =~ ^[Yy] ]]; then
+        TRANSCRIBE_ARRAY+=(1)
+        echo "   Transcription: ENABLED"
+      else
+        TRANSCRIBE_ARRAY+=(0)
+        echo "   Transcription: DISABLED"
+      fi
+    else
+      TRANSCRIBE_ARRAY+=(0)
+      echo "   Transcription: DISABLED (global setting)"
+    fi
+    
     echo
   done
   
-  # Confirm before starting
-  echo -e "${YELLOW}Ready to start processing all drives with the labels shown above.${NC}"
+  # Confirm before starting the walkaway process
+  echo -e "${YELLOW}Ready to start walkaway processing for all drives.${NC}"
+  echo -e "${BLUE}For duplicate drives: $([ "$DUPLICATES_CHOICE" -eq 1 ] && echo "Replace existing entries" || [ "$DUPLICATES_CHOICE" -eq 2 ] && echo "Create new entries" || echo "Skip drives")${NC}"
   echo -e "${BLUE}Start processing? (y/n)${NC}"
   read -e start_confirm
   
@@ -738,17 +1011,11 @@ full_process() {
   fi
   echo -e "${GREEN}=====================================================${NC}"
   echo
+  echo "Starting walkaway cataloging process..."
+  echo
   
-  # Confirm before starting cataloging
-  echo -e "${BLUE}Ready to start cataloging all drives? (y/n)${NC}"
-  read -e catalog_confirm
-  
-  if [[ ! "$catalog_confirm" =~ ^[Yy] ]]; then
-    echo "Cataloging canceled, health checks were completed."
-    echo "Press Enter to continue..."
-    read
-    return
-  fi
+  # Build the batch flag for duplicate handling
+  BATCH_FLAGS="--batch-mode --duplicate-choice $DUPLICATES_CHOICE"
   
   if [ $PARALLEL -eq 1 ]; then
     # Parallel processing (2 drives at a time)
@@ -757,28 +1024,29 @@ full_process() {
       # Process first drive
       mount_point="${MOUNTED_DRIVES[$i]}"
       label="${CUSTOM_LABELS[$i]}"
+      do_transcribe=${TRANSCRIBE_ARRAY[$i]}
       
       echo
       echo -e "${GREEN}==================================================${NC}"
       echo -e "${BLUE}CATALOGING Drive #$((i+1)): $mount_point (Label: $label)${NC}"
+      if [ $do_transcribe -eq 1 ]; then
+        echo -e "${BLUE}Transcription: ENABLED${NC}"
+      else
+        echo -e "${BLUE}Transcription: DISABLED${NC}"
+      fi
       echo -e "${GREEN}==================================================${NC}"
       
       # Create log file
       LOG_FILE_1="$LOG_DIR/drive_$(echo "$mount_point" | tr '/' '_').log"
       
-      # Ask about transcription
-      echo -e "${BLUE}Enable audio transcription for this drive? (y/n):${NC}"
-      read -e do_transcribe
-      
       # Start catalog in background
       echo "Starting cataloging in background..."
       echo "Logging output to: $LOG_FILE_1"
       
-      if [[ "$do_transcribe" =~ ^[Yy] ]]; then
-        echo "Transcription enabled for this drive."
-        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t > "$LOG_FILE_1" 2>&1) &
+      if [ $do_transcribe -eq 1 ]; then
+        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t $BATCH_FLAGS > "$LOG_FILE_1" 2>&1) &
       else
-        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" > "$LOG_FILE_1" 2>&1) &
+        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" $BATCH_FLAGS > "$LOG_FILE_1" 2>&1) &
       fi
       CATALOG_PID_1=$!
       
@@ -787,15 +1055,17 @@ full_process() {
       if [ $j -lt ${#MOUNTED_DRIVES[@]} ]; then
         mount_point2="${MOUNTED_DRIVES[$j]}"
         label2="${CUSTOM_LABELS[$j]}"
+        do_transcribe2=${TRANSCRIBE_ARRAY[$j]}
         
         echo
         echo -e "${GREEN}==================================================${NC}"
         echo -e "${BLUE}CATALOGING Drive #$((j+1)): $mount_point2 (Label: $label2)${NC}"
+        if [ $do_transcribe2 -eq 1 ]; then
+          echo -e "${BLUE}Transcription: ENABLED${NC}"
+        else
+          echo -e "${BLUE}Transcription: DISABLED${NC}"
+        fi
         echo -e "${GREEN}==================================================${NC}"
-        
-        # Ask about transcription for second drive
-        echo -e "${BLUE}Enable audio transcription for this drive? (y/n):${NC}"
-        read -e do_transcribe2
         
         # Create second log file
         LOG_FILE_2="$LOG_DIR/drive_$(echo "$mount_point2" | tr '/' '_').log"
@@ -804,11 +1074,10 @@ full_process() {
         echo "Starting cataloging in background..."
         echo "Logging output to: $LOG_FILE_2"
         
-        if [[ "$do_transcribe2" =~ ^[Yy] ]]; then
-          echo "Transcription enabled for this drive."
-          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" -t > "$LOG_FILE_2" 2>&1) &
+        if [ $do_transcribe2 -eq 1 ]; then
+          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" -t $BATCH_FLAGS > "$LOG_FILE_2" 2>&1) &
         else
-          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" > "$LOG_FILE_2" 2>&1) &
+          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" $BATCH_FLAGS > "$LOG_FILE_2" 2>&1) &
         fi
         CATALOG_PID_2=$!
         
@@ -855,14 +1124,6 @@ full_process() {
         # Increment counter
         i=$((i+1))
       fi
-      
-      echo
-      echo -e "${BLUE}Continue to next batch of drives for cataloging? (y/n)${NC}"
-      read -e continue
-      if [[ ! "$continue" =~ ^[Yy] ]]; then
-        echo "Stopping batch processing."
-        break
-      fi
     done
     
   else
@@ -870,24 +1131,25 @@ full_process() {
     for i in "${!MOUNTED_DRIVES[@]}"; do
       mount_point="${MOUNTED_DRIVES[$i]}"
       label="${CUSTOM_LABELS[$i]}"
+      do_transcribe=${TRANSCRIBE_ARRAY[$i]}
       
       echo
       echo -e "${GREEN}==================================================${NC}"
       echo -e "${BLUE}CATALOGING Drive #$((i+1)): $mount_point (Label: $label)${NC}"
+      if [ $do_transcribe -eq 1 ]; then
+        echo -e "${BLUE}Transcription: ENABLED${NC}"
+      else
+        echo -e "${BLUE}Transcription: DISABLED${NC}"
+      fi
       echo -e "${GREEN}==================================================${NC}"
       
-      # Ask about transcription
-      echo -e "${BLUE}Enable audio transcription for this drive? (y/n):${NC}"
-      read -e do_transcribe
-      
-      # STEP 1: Catalog the drive
+      # Catalog the drive with predetermined settings
       echo "Starting cataloging..."
       
-      if [[ "$do_transcribe" =~ ^[Yy] ]]; then
-        echo "Transcription enabled for this drive."
-        python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t
+      if [ $do_transcribe -eq 1 ]; then
+        python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t $BATCH_FLAGS
       else
-        python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label"
+        python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" $BATCH_FLAGS
       fi
       
       echo
@@ -895,8 +1157,6 @@ full_process() {
       echo -e "${GREEN}Completed cataloging drive: $mount_point${NC}"
       echo -e "${GREEN}==================================================${NC}"
       echo
-      echo "Press Enter to continue to next drive..."
-      read
     done
   fi
   
@@ -952,15 +1212,60 @@ process_transcriptions() {
     workers=2
   fi
   
+  # Show estimated time based on model size
+  echo
+  echo -e "${YELLOW}Estimated processing time per hour of audio:${NC}"
+  case $model in
+    tiny) echo "  - Tiny model: ~3-5 minutes per hour of audio" ;;
+    base) echo "  - Base model: ~8-12 minutes per hour of audio" ;;
+    small) echo "  - Small model: ~15-25 minutes per hour of audio" ;;
+    medium) echo "  - Medium model: ~30-45 minutes per hour of audio" ;;
+    large) echo "  - Large model: ~60-90 minutes per hour of audio" ;;
+  esac
+  
+  # Confirm before starting walkaway process
+  echo
+  echo -e "${BLUE}Start walkaway transcription processing? (y/n)${NC}"
+  read -e confirm
+  
+  if [[ ! "$confirm" =~ ^[Yy] ]]; then
+    echo "Transcription processing canceled."
+    echo "Press Enter to continue..."
+    read
+    return
+  fi
+  
+  # Create log directory
+  LOG_DIR="$HOME/vaultkeeper_logs"
+  mkdir -p "$LOG_DIR"
+  
+  # Create log file for this transcription batch
+  TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+  LOG_FILE="$LOG_DIR/transcription_${TIMESTAMP}.log"
+  
+  echo
+  echo -e "${GREEN}Starting walkaway transcription processing${NC}"
+  echo "Transcription log will be saved to: $LOG_FILE"
+  echo "This process will continue until all files are processed."
+  echo "You can safely return to the main menu when ready."
+  echo
+  
   # Build command
   if [ -z "$drive_id" ]; then
     echo "Processing all pending transcriptions with $model model using $workers workers..."
-    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" transcribe -m "$model" -w "$workers"
+    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" transcribe -m "$model" -w "$workers" > "$LOG_FILE" 2>&1
   else
     echo "Processing transcriptions for drive $drive_id with $model model using $workers workers..."
-    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" transcribe -d "$drive_id" -m "$model" -w "$workers"
+    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" transcribe -d "$drive_id" -m "$model" -w "$workers" > "$LOG_FILE" 2>&1
   fi
   
+  echo
+  echo -e "${GREEN}Transcription processing complete!${NC}"
+  echo "Results have been logged to: $LOG_FILE"
+  echo
+  echo "Here's a summary of the processing log:"
+  tail -n 15 "$LOG_FILE"
+  echo
   echo "Press Enter to continue..."
   read
 }
