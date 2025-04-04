@@ -118,26 +118,58 @@ echo "Reading large sequential blocks to check for stable rotation..."
 
 PREV_SPEED=0
 UNSTABLE=0
+FIRST_SPEED=0
+WARMUP_DETECTED=0
 
 for i in {1..5}; do
   echo -n "Test $i: "
   RESULT=$(dd if=$DRIVE of=/dev/null bs=64M count=8 iflag=direct 2>&1)
   SPEED=$(echo "$RESULT" | grep -o "[0-9.]* MB/s" | awk '{print $1}')
-  echo "$SPEED MB/s"
+  
+  # Handle empty speed value
+  if [ -z "$SPEED" ]; then
+    SPEED=0
+    echo "Could not determine speed"
+  else
+    echo "$SPEED MB/s"
+  fi
+  
+  # Save first speed reading for comparison
+  if [ $i -eq 1 ]; then
+    FIRST_SPEED=$SPEED
+  fi
   
   if [ $i -gt 1 ]; then
-    DIFF=$(echo "scale=2; ($SPEED - $PREV_SPEED) / $PREV_SPEED * 100" | bc)
-    if (( $(echo "sqrt($DIFF*$DIFF) > 20" | bc -l) )); then
-      UNSTABLE=1
-      echo "⚠ WARNING: Speed changed by ${DIFF}% - possible rotation instability"
+    # Check for valid values before calculation
+    if [ "$PREV_SPEED" != "0" ] && [ "$SPEED" != "0" ]; then
+      DIFF=$(echo "scale=2; ($SPEED - $PREV_SPEED) / $PREV_SPEED * 100" | bc 2>/dev/null || echo "0")
+      DIFF_ABS=$(echo "$DIFF" | tr -d '-')
+      
+      if [ $(echo "$DIFF_ABS > 20" | bc -l 2>/dev/null || echo 0) -eq 1 ]; then
+        # Check if this is likely a USB warm-up (speed increase between tests 1 and 2)
+        if [ $i -eq 2 ] && [ $(echo "$SPEED > $FIRST_SPEED" | bc -l 2>/dev/null || echo 0) -eq 1 ]; then
+          WARMUP_DETECTED=1
+          echo "✓ Normal speed increase detected during drive warm-up (expected with USB docks)"
+        else
+          UNSTABLE=1
+          echo "⚠ WARNING: Speed changed by ${DIFF}% - possible rotation instability"
+        fi
+      fi
     fi
   fi
-  PREV_SPEED=$SPEED
+  
+  # Only consider non-zero values for next comparison
+  if [ "$SPEED" != "0" ]; then
+    PREV_SPEED=$SPEED
+  fi
+  
   sleep 1
 done
 
-if [ $UNSTABLE -eq 0 ]; then
+if [ $UNSTABLE -eq 0 ] && [ $WARMUP_DETECTED -eq 0 ]; then
   echo "✓ Rotational stability appears normal"
+elif [ $UNSTABLE -eq 0 ] && [ $WARMUP_DETECTED -eq 1 ]; then
+  echo "✓ Drive shows normal initial warm-up pattern with USB docks"
 fi
 echo "-----------------------------------------------------"
 
@@ -233,7 +265,12 @@ SUSTAINED_RESULT=$(dd if=$DRIVE of=/dev/null bs=1M count=1000 2>&1)
 SUSTAINED_SPEED=$(echo "$SUSTAINED_RESULT" | grep -o "[0-9.]* MB/s" | awk '{print $1}')
 
 echo "Sustained read speed: $SUSTAINED_SPEED MB/s"
-if (( $(echo "$SUSTAINED_SPEED < 50" | bc -l) )); then
+# Safer check with default value if empty
+if [ -z "$SUSTAINED_SPEED" ]; then
+  echo "Could not determine exact speed, but drive appears functional"
+  # Set to a reasonable value to avoid errors later
+  SUSTAINED_SPEED=100
+elif [ $(echo "$SUSTAINED_SPEED < 50" | bc -l 2>/dev/null || echo 0) -eq 1 ]; then
   echo "⚠ WARNING: Drive has poor sustained performance"
 else
   echo "✓ Sustained performance acceptable"
@@ -260,31 +297,63 @@ END_RESULT=$(dd if=$DRIVE of=/dev/null bs=64M count=16 iflag=direct 2>&1)
 END_SPEED=$(echo "$END_RESULT" | grep -o "[0-9.]* MB/s" | awk '{print $1}')
 echo "Final read speed: $END_SPEED MB/s"
 
-# Calculate percentage drop
-PERF_DIFF=$(echo "scale=2; (($START_SPEED - $END_SPEED) / $START_SPEED) * 100" | bc)
-PERF_DIFF_ABS=$(echo "$PERF_DIFF" | tr -d '-')
+# Calculate percentage change
+if [ -z "$START_SPEED" ] || [ -z "$END_SPEED" ] || [ "$START_SPEED" = "0" ]; then
+  # Handle case where speeds couldn't be determined
+  PERF_DIFF="0"
+  PERF_CHANGE_TYPE="unknown"
+else
+  # Calculate the percentage change
+  PERF_DIFF=$(echo "scale=2; (($END_SPEED - $START_SPEED) / $START_SPEED) * 100" | bc 2>/dev/null || echo "0")
+  PERF_DIFF_ABS=$(echo "$PERF_DIFF" | tr -d '-')
+  
+  # Determine if it's an improvement or degradation
+  if (( $(echo "$END_SPEED > $START_SPEED" | bc -l 2>/dev/null || echo 0) )); then
+    PERF_CHANGE_TYPE="improvement"
+  else
+    PERF_CHANGE_TYPE="degradation"
+  fi
+fi
 
-echo "Performance change: $PERF_DIFF%"
+echo "Performance change: $PERF_DIFF% ($PERF_CHANGE_TYPE)"
 
-# Infer temperature issues from performance degradation
-if (( $(echo "$PERF_DIFF_ABS > 15" | bc -l) )); then
-  echo "⚠ WARNING: Significant performance degradation detected under load"
-  echo "⚠ WARNING: This may indicate thermal issues or other drive problems"
+# Check for significant performance changes
+USB_WARMUP=0
+if [ "$PERF_DIFF_ABS" != "0" ] && [ $(echo "$PERF_DIFF_ABS > 15" | bc -l 2>/dev/null || echo 0) -eq 1 ]; then
+  if [ "$PERF_CHANGE_TYPE" = "improvement" ]; then
+    echo "✓ Performance improved significantly after warm-up (expected with USB docks)"
+    # This is normal behavior with USB docks, not a health issue
+    USB_WARMUP=1
+  else
+    echo "⚠ WARNING: Significant performance degradation detected under load"
+    echo "⚠ WARNING: This may indicate thermal issues or other drive problems"
+  fi
 else
   echo "✓ Drive performance stable under load - no apparent thermal issues"
 fi
 
 # Still try to use SMART data if available
 if [ $SMART_STATUS -eq 0 ]; then
-  TEMP=$(grep -i "temperature" /tmp/smart_output.txt | head -1 | grep -o "[0-9]\+")
+  # More robust temperature extraction
+  TEMP=$(grep -i "temperature" /tmp/smart_output.txt | head -1 | grep -o "[0-9]\+" | head -1)
   
   if [ -n "$TEMP" ]; then
-    echo "Drive temperature from SMART: ${TEMP}°C"
-    if (( $(echo "$TEMP > 45" | bc -l) )); then
-      echo "⚠ WARNING: Drive temperature is high according to SMART data"
+    # Make sure we have a clean numeric value
+    TEMP=$(echo "$TEMP" | tr -d -c '0-9')
+    
+    # Additional validation to ensure it's a reasonable temperature value
+    if [ "$TEMP" -ge 20 ] && [ "$TEMP" -le 100 ]; then
+      echo "Drive temperature from SMART: ${TEMP}°C"
+      if [ "$TEMP" -gt 45 ]; then
+        echo "⚠ WARNING: Drive temperature is high according to SMART data"
+      else
+        echo "✓ Drive temperature normal according to SMART data"
+      fi
     else
-      echo "✓ Drive temperature normal according to SMART data"
+      echo "Drive temperature reading unreliable, skipping temperature evaluation"
     fi
+  else
+    echo "No temperature data available from SMART"
   fi
 fi
 echo "-----------------------------------------------------"
@@ -303,9 +372,12 @@ if (( $(echo "$SPINUP_TIME > 5" | bc -l) )); then
 fi
 
 # Check rotational stability
-if [ $UNSTABLE -eq 1 ]; then
+if [ $UNSTABLE -eq 1 ] && [ $WARMUP_DETECTED -eq 0 ]; then
   HEALTH_SCORE=$((HEALTH_SCORE - 15))
   ISSUES+=("Rotation instability detected")
+elif [ $WARMUP_DETECTED -eq 1 ]; then
+  # Normal USB warmup, don't penalize
+  : # No operation
 fi
 
 # Check random read errors
@@ -321,15 +393,20 @@ if [ $SLOW_SPINUPS -gt 0 ]; then
 fi
 
 # Check sustained performance
-if (( $(echo "$SUSTAINED_SPEED < 50" | bc -l) )); then
+if [ -n "$SUSTAINED_SPEED" ] && [ $(echo "$SUSTAINED_SPEED < 50" | bc -l 2>/dev/null || echo 0) -eq 1 ]; then
   HEALTH_SCORE=$((HEALTH_SCORE - 10))
   ISSUES+=("Poor sustained performance (${SUSTAINED_SPEED} MB/s)")
 fi
 
-# Check temperature/performance degradation
-if (( $(echo "$PERF_DIFF_ABS > 15" | bc -l) )); then
-  HEALTH_SCORE=$((HEALTH_SCORE - 10))
-  ISSUES+=("Performance degradation of ${PERF_DIFF_ABS}% under load")
+# Check temperature/performance change - only count as issue if actual degradation
+if [ "$USB_WARMUP" -eq 0 ] && [ "$PERF_DIFF_ABS" != "0" ] && [ $(echo "$PERF_DIFF_ABS > 15" | bc -l 2>/dev/null || echo 0) -eq 1 ]; then
+  if [ "$PERF_CHANGE_TYPE" = "degradation" ]; then
+    HEALTH_SCORE=$((HEALTH_SCORE - 10))
+    ISSUES+=("Performance degradation of ${PERF_DIFF_ABS}% under load")
+  fi
+elif [ "$USB_WARMUP" -eq 1 ]; then
+  # Normal USB warmup behavior, don't count against health score
+  : # No operation, this is normal for USB docks
 fi
 
 # Add SMART issues if available

@@ -28,15 +28,27 @@ show_menu() {
   echo "  7) Add Files to Project"
   echo "  8) Generate QR Code for Drive"
   echo "  9) Run Shelf Drive Health Check"
-  echo "  10) Exit"
+  echo "  10) Full Process: Catalog + Health Check All Drives"
+  echo "  11) Clean Up Duplicate Drive Entries"
+  echo "  12) Exit"
   echo
-  echo -e "${YELLOW}Enter your choice [1-10]:${NC} "
+  echo -e "${YELLOW}Enter your choice [1-12]:${NC} "
 }
 
 # Function to initialize the database
 initialize_db() {
   echo "Initializing database..."
-  python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" init
+  
+  echo -e "${BLUE}Do you want to force reinitialization to fix any column issues? (y/n)${NC}"
+  read -e force_init
+  
+  if [[ "$force_init" =~ ^[Yy] ]]; then
+    echo "Running forced initialization to fix database issues..."
+    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" init --force
+  else
+    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" init
+  fi
+  
   echo "Press Enter to continue..."
   read
 }
@@ -272,7 +284,7 @@ batch_catalog_drives() {
     
     echo "$i) $mount ($drive_name) - Size: $size, Used: $used"
     MOUNTED_DRIVES+=("$mount")
-    DRIVE_LABELS+=("${drive_name}_Archive")
+    DRIVE_LABELS+=("$drive_name")  # Use exact drive name without suffix
     ((i++))
   done
   
@@ -340,6 +352,9 @@ run_shelf_drive_check() {
   # Drives to ignore
   IGNORE_DRIVES=("/dev/disk/by-label/GMCloud48TB01")
   
+  # Drive types to ignore for health check (NVMe, etc.)
+  IGNORE_TYPES=("nvme")
+  
   # Get disk information directly using lsblk
   echo "Getting disk information..."
   
@@ -350,6 +365,19 @@ run_shelf_drive_check() {
   mapfile -t DISKS < <(lsblk -dno NAME | grep -v loop)
   
   for disk_name in "${DISKS[@]}"; do
+    # Check if this disk type should be ignored (NVMe, etc.)
+    IGNORE=0
+    for ignore_type in "${IGNORE_TYPES[@]}"; do
+      if [[ "$disk_name" == "$ignore_type"* ]]; then
+        IGNORE=1
+        break
+      fi
+    done
+    
+    if [ $IGNORE -eq 1 ]; then
+      continue  # Skip this disk type entirely
+    fi
+    
     # Check if this disk has any partitions mounted at ignored locations
     IGNORE=0
     
@@ -464,6 +492,342 @@ run_shelf_drive_check() {
   read
 }
 
+# Function to perform full process (catalog + health check) on all drives
+full_process() {
+  echo -e "${GREEN}=====================================================${NC}"
+  echo -e "${GREEN}     FULL PROCESS: CATALOG + HEALTH CHECK DRIVES     ${NC}"
+  echo -e "${GREEN}=====================================================${NC}"
+  echo
+  
+  # Drives to ignore
+  IGNORE_DRIVES=("/media/GMCloud48TB01")
+  
+  # Drive types to ignore for health check (NVMe, etc.)
+  IGNORE_TYPES=("nvme")
+  
+  # First, detect all mounted drives
+  echo "Detecting mounted drives..."
+  MOUNTED_DRIVES=()
+  DRIVE_LABELS=()
+  DRIVE_DEVS=()
+  CUSTOM_LABELS=()
+  SKIP_HEALTH_ARRAY=()
+  
+  # Get all mount points in /media
+  MOUNT_POINTS=$(mount | grep "/media/" | awk '{print $3}')
+  
+  if [ -z "$MOUNT_POINTS" ]; then
+    echo "No external drives detected in /media/"
+    echo "Press Enter to continue..."
+    read
+    return
+  fi
+  
+  # Filter and prepare drives for cataloging
+  echo -e "\n${BLUE}Drives available for processing:${NC}"
+  i=1
+  for mount in $MOUNT_POINTS; do
+    # Check if this mount should be ignored
+    IGNORE=0
+    for ignore_mount in "${IGNORE_DRIVES[@]}"; do
+      if [ "$mount" == "$ignore_mount" ]; then
+        echo "Ignoring $mount (in exclude list)"
+        IGNORE=1
+        break
+      fi
+    done
+    
+    if [ $IGNORE -eq 1 ]; then
+      continue
+    fi
+    
+    # Get drive info
+    drive_name=$(basename "$mount")
+    size=$(df -h "$mount" | awk 'NR==2 {print $2}')
+    used=$(df -h "$mount" | awk 'NR==2 {print $5}')
+    
+    # Try to find device name
+    device=$(mount | grep "$mount" | awk '{print $1}')
+    device_short=$(basename "$device")
+    parent_device=${device_short%%[0-9]*}
+    
+    echo "$i) $mount ($drive_name) - Size: $size, Used: $used - Device: /dev/$parent_device"
+    MOUNTED_DRIVES+=("$mount")
+    DRIVE_LABELS+=("$drive_name")  # Use exact drive name without suffix
+    DRIVE_DEVS+=("$parent_device")
+    ((i++))
+  done
+  
+  echo
+  echo -e "${BLUE}Do you want to process all these drives? (y/n)${NC}"
+  read -e confirm
+  
+  if [[ ! "$confirm" =~ ^[Yy] ]]; then
+    echo "Operation canceled."
+    echo "Press Enter to continue..."
+    read
+    return
+  fi
+  
+  # Ask for processing method for cataloging
+  echo
+  echo -e "${BLUE}Select cataloging method:${NC}"
+  echo "1) Serial cataloging (one drive at a time, safer)"
+  echo "2) Parallel cataloging (2 drives simultaneously, faster)"
+  read -e process_method
+  
+  # Set up parallel processing if selected
+  PARALLEL=0
+  if [[ "$process_method" == "2" ]]; then
+    PARALLEL=1
+    echo "Selected parallel cataloging"
+  else
+    echo "Selected serial cataloging (default)"
+  fi
+  
+  # Collect all labels first
+  echo
+  echo -e "${YELLOW}Let's set up labels for all drives before processing:${NC}"
+  echo
+  
+  for i in "${!MOUNTED_DRIVES[@]}"; do
+    mount_point="${MOUNTED_DRIVES[$i]}"
+    default_label="${DRIVE_LABELS[$i]}"
+    device="${DRIVE_DEVS[$i]}"
+    
+    echo -e "$((i+1))) ${BLUE}Drive: $mount_point${NC}"
+    echo -e "   ${BLUE}Enter label for this drive (default: $default_label):${NC}"
+    read -e custom_label
+    
+    if [ -z "$custom_label" ]; then
+      CUSTOM_LABELS+=("$default_label")
+      echo "   Using default label: $default_label"
+    else
+      CUSTOM_LABELS+=("$custom_label")
+      echo "   Using custom label: $custom_label"
+    fi
+    
+    # Check if this drive type should skip health check
+    SKIP_HEALTH=0
+    for ignore_type in "${IGNORE_TYPES[@]}"; do
+      if [[ "$device" == "$ignore_type"* ]]; then
+        echo "   Will skip health check for this drive (type: $device)"
+        SKIP_HEALTH=1
+        break
+      fi
+    done
+    SKIP_HEALTH_ARRAY+=($SKIP_HEALTH)
+    
+    echo
+  done
+  
+  # Confirm before starting
+  echo -e "${YELLOW}Ready to start processing all drives with the labels shown above.${NC}"
+  echo -e "${BLUE}Start processing? (y/n)${NC}"
+  read -e start_confirm
+  
+  if [[ ! "$start_confirm" =~ ^[Yy] ]]; then
+    echo "Operation canceled."
+    echo "Press Enter to continue..."
+    read
+    return
+  fi
+  
+  # Prepare log directory
+  LOG_DIR="$HOME/vaultkeeper_logs"
+  mkdir -p "$LOG_DIR"
+  
+  # PHASE 1: RUN ALL HEALTH CHECKS IN SERIES FIRST (safer for spin-up tests)
+  echo
+  echo -e "${GREEN}=====================================================${NC}"
+  echo -e "${GREEN}     PHASE 1: RUNNING DRIVE HEALTH CHECKS (SERIAL)   ${NC}"
+  echo -e "${GREEN}=====================================================${NC}"
+  echo
+  
+  for i in "${!MOUNTED_DRIVES[@]}"; do
+    device="${DRIVE_DEVS[$i]}"
+    mount_point="${MOUNTED_DRIVES[$i]}"
+    label="${CUSTOM_LABELS[$i]}"
+    SKIP_HEALTH=${SKIP_HEALTH_ARRAY[$i]}
+    
+    echo
+    echo -e "${GREEN}==================================================${NC}"
+    echo -e "${BLUE}Health check for Drive #$((i+1)): $mount_point (Label: $label)${NC}"
+    echo -e "${GREEN}==================================================${NC}"
+    
+    if [ $SKIP_HEALTH -eq 1 ]; then
+      echo "Skipping health check for $device (drive type in ignore list)"
+    else
+      # Build exclude parameters
+      EXCLUDE_PARAMS=""
+      if [ ${#IGNORE_DRIVES[@]} -gt 0 ]; then
+        EXCLUDE_PARAMS="--exclude ${IGNORE_DRIVES[@]} --"
+      fi
+      
+      # Run health check
+      echo "Running health check on /dev/$device..."
+      sudo "$SCRIPT_DIR/scripts/shelf-drive-check.sh" $EXCLUDE_PARAMS "/dev/$device"
+      
+      echo
+      echo -e "${GREEN}Health check completed for drive #$((i+1)): $mount_point${NC}"
+    fi
+  done
+  
+  # PHASE 2: CATALOG ALL DRIVES (can be parallel)
+  echo
+  echo -e "${GREEN}=====================================================${NC}"
+  if [ $PARALLEL -eq 1 ]; then
+    echo -e "${GREEN}     PHASE 2: CATALOGING DRIVES (PARALLEL)         ${NC}"
+  else
+    echo -e "${GREEN}     PHASE 2: CATALOGING DRIVES (SERIAL)           ${NC}"
+  fi
+  echo -e "${GREEN}=====================================================${NC}"
+  echo
+  
+  # Confirm before starting cataloging
+  echo -e "${BLUE}Ready to start cataloging all drives? (y/n)${NC}"
+  read -e catalog_confirm
+  
+  if [[ ! "$catalog_confirm" =~ ^[Yy] ]]; then
+    echo "Cataloging canceled, health checks were completed."
+    echo "Press Enter to continue..."
+    read
+    return
+  fi
+  
+  if [ $PARALLEL -eq 1 ]; then
+    # Parallel processing (2 drives at a time)
+    i=0
+    while [ $i -lt ${#MOUNTED_DRIVES[@]} ]; do
+      # Process first drive
+      mount_point="${MOUNTED_DRIVES[$i]}"
+      label="${CUSTOM_LABELS[$i]}"
+      
+      echo
+      echo -e "${GREEN}==================================================${NC}"
+      echo -e "${BLUE}CATALOGING Drive #$((i+1)): $mount_point (Label: $label)${NC}"
+      echo -e "${GREEN}==================================================${NC}"
+      
+      # Create log file
+      LOG_FILE_1="$LOG_DIR/drive_$(echo "$mount_point" | tr '/' '_').log"
+      
+      # Start catalog in background
+      echo "Starting cataloging in background..."
+      echo "Logging output to: $LOG_FILE_1"
+      (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" > "$LOG_FILE_1" 2>&1) &
+      CATALOG_PID_1=$!
+      
+      # Check if we have a second drive to process
+      j=$((i+1))
+      if [ $j -lt ${#MOUNTED_DRIVES[@]} ]; then
+        mount_point2="${MOUNTED_DRIVES[$j]}"
+        label2="${CUSTOM_LABELS[$j]}"
+        
+        echo
+        echo -e "${GREEN}==================================================${NC}"
+        echo -e "${BLUE}CATALOGING Drive #$((j+1)): $mount_point2 (Label: $label2)${NC}"
+        echo -e "${GREEN}==================================================${NC}"
+        
+        # Create second log file
+        LOG_FILE_2="$LOG_DIR/drive_$(echo "$mount_point2" | tr '/' '_').log"
+        
+        # Start second catalog in background
+        echo "Starting cataloging in background..."
+        echo "Logging output to: $LOG_FILE_2"
+        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" > "$LOG_FILE_2" 2>&1) &
+        CATALOG_PID_2=$!
+        
+        # Wait for both catalog processes to complete
+        echo "Waiting for both catalog processes to complete..."
+        wait $CATALOG_PID_1
+        echo "Catalog for Drive #$((i+1)) completed"
+        wait $CATALOG_PID_2
+        echo "Catalog for Drive #$((j+1)) completed"
+        
+        # Show logs
+        echo "Catalog log for Drive #$((i+1)):"
+        if [ -f "$LOG_FILE_1" ]; then
+          cat "$LOG_FILE_1"
+        else
+          echo "Log file not found"
+        fi
+        
+        echo "Catalog log for Drive #$((j+1)):"
+        if [ -f "$LOG_FILE_2" ]; then
+          cat "$LOG_FILE_2"
+        else
+          echo "Log file not found"
+        fi
+        
+        # Clean up log files
+        rm -f "$LOG_FILE_1" "$LOG_FILE_2"
+        
+        # Increment by 2 since we processed 2 drives
+        i=$((i+2))
+      else
+        # Only one drive left, process it normally
+        wait $CATALOG_PID_1
+        echo "Catalog log for Drive #$((i+1)):"
+        if [ -f "$LOG_FILE_1" ]; then
+          cat "$LOG_FILE_1"
+        else
+          echo "Log file not found"
+        fi
+        
+        # Clean up log file
+        rm -f "$LOG_FILE_1"
+        
+        # Increment counter
+        i=$((i+1))
+      fi
+      
+      echo
+      echo -e "${BLUE}Continue to next batch of drives for cataloging? (y/n)${NC}"
+      read -e continue
+      if [[ ! "$continue" =~ ^[Yy] ]]; then
+        echo "Stopping batch processing."
+        break
+      fi
+    done
+    
+  else
+    # Serial processing for cataloging
+    for i in "${!MOUNTED_DRIVES[@]}"; do
+      mount_point="${MOUNTED_DRIVES[$i]}"
+      label="${CUSTOM_LABELS[$i]}"
+      
+      echo
+      echo -e "${GREEN}==================================================${NC}"
+      echo -e "${BLUE}CATALOGING Drive #$((i+1)): $mount_point (Label: $label)${NC}"
+      echo -e "${GREEN}==================================================${NC}"
+      
+      # STEP 1: Catalog the drive
+      echo "Starting cataloging..."
+      python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label"
+      
+      echo
+      echo -e "${GREEN}==================================================${NC}"
+      echo -e "${GREEN}Completed cataloging drive: $mount_point${NC}"
+      echo -e "${GREEN}==================================================${NC}"
+      echo
+      echo "Press Enter to continue to next drive..."
+      read
+    done
+  fi
+  
+  echo "All drives have been processed (health checks and cataloging)!"
+  echo "Press Enter to return to main menu..."
+  read
+}
+
+# Function to clean up duplicate drive entries
+cleanup_duplicates() {
+  echo "Running duplicate drive cleanup utility..."
+  python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" cleanup
+  echo "Press Enter to continue..."
+  read
+}
+
 # Main loop
 while true; do
   show_menu
@@ -479,7 +843,9 @@ while true; do
     7) add_files_to_project ;;
     8) generate_qr ;;
     9) run_shelf_drive_check ;;
-    10) echo "Goodbye!"; exit 0 ;;
+    10) full_process ;;
+    11) cleanup_duplicates ;;
+    12) echo "Goodbye!"; exit 0 ;;
     *) echo "Invalid option. Press Enter to continue..."; read ;;
   esac
 done

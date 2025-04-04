@@ -28,7 +28,9 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 def init_db():
     """Initialize the SQLite database with proper schema"""
-    conn = sqlite3.connect(DB_PATH)
+    # Use a longer timeout and enable WAL mode for better concurrency
+    conn = sqlite3.connect(DB_PATH, timeout=60.0)
+    conn.execute('PRAGMA journal_mode=WAL')
     cursor = conn.cursor()
     
     # Drives table
@@ -48,7 +50,7 @@ def init_db():
     )
     ''')
     
-    # Files table with metadata
+    # Files table with metadata - add thumbnail_path field if it doesn't exist
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS files (
         id TEXT PRIMARY KEY,
@@ -66,6 +68,19 @@ def init_db():
         FOREIGN KEY (drive_id) REFERENCES drives (id)
     )
     ''')
+    
+    # Create indexes for better performance
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_drive_id ON files (drive_id)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_extension ON files (extension)')
+    
+    # Check if thumbnail_path column exists, if not add it
+    cursor.execute("PRAGMA table_info(files)")
+    columns = cursor.fetchall()
+    column_names = [column[1] for column in columns]
+    
+    if 'thumbnail_path' not in column_names:
+        print("Adding thumbnail_path column to files table...")
+        cursor.execute("ALTER TABLE files ADD COLUMN thumbnail_path TEXT")
     
     # Projects table to organize files
     cursor.execute('''
@@ -98,6 +113,143 @@ def init_db():
     
     conn.commit()
     conn.close()
+
+def check_for_duplicate_drive(volume_name, mount_point, size_bytes, conn=None):
+    """
+    Check if a drive with the same volume name already exists in the database
+    Returns the drive info if found, None otherwise
+    """
+    close_conn = False
+    if conn is None:
+        conn = sqlite3.connect(DB_PATH, timeout=60.0)
+        conn.execute('PRAGMA journal_mode=WAL')
+        close_conn = True
+    
+    cursor = conn.cursor()
+    
+    # Check by volume name
+    cursor.execute("SELECT * FROM drives WHERE volume_name = ?", (volume_name,))
+    drive_rows = cursor.fetchall()
+    
+    if drive_rows:
+        # Convert rows to dictionaries
+        column_names = [description[0] for description in cursor.description]
+        results = []
+        
+        for row in drive_rows:
+            drive_dict = {column_names[i]: row[i] for i in range(len(column_names))}
+            results.append(drive_dict)
+        
+        if close_conn:
+            conn.close()
+        
+        return results
+    
+    if close_conn:
+        conn.close()
+    
+    return None
+
+def handle_duplicate_drive(duplicate_drives, new_drive_info):
+    """
+    Handle duplicate drive entries - interactive mode to merge or replace
+    Returns updated drive_info to use
+    """
+    print("\n==== DUPLICATE DRIVE DETECTED ====")
+    print(f"The drive '{new_drive_info['volume_name']}' has been cataloged before.")
+    print(f"Found {len(duplicate_drives)} previous entries:")
+    
+    for i, drive in enumerate(duplicate_drives):
+        catalog_date = drive.get('date_cataloged', 'Unknown date')
+        # Try to parse ISO date format for better display
+        try:
+            date_obj = datetime.datetime.fromisoformat(catalog_date)
+            catalog_date = date_obj.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+            
+        # Show essential information
+        print(f"{i+1}. ID: {drive.get('id')}")
+        print(f"   Label: {drive.get('label') or drive.get('volume_name')}")
+        print(f"   Size: {drive.get('size_bytes', 0) / (1024**3):.2f} GB")
+        print(f"   Cataloged: {catalog_date}")
+        print(f"   Files: {get_file_count_for_drive(drive.get('id'))}")
+        print()
+    
+    print("Options:")
+    print("1) Replace one of the existing entries (keeps the same drive ID)")
+    print("2) Create a new entry (will result in duplicate entries)")
+    print("3) Cancel operation")
+    
+    choice = input("\nYour choice (1-3): ").strip()
+    
+    if choice == "1":
+        if len(duplicate_drives) == 1:
+            drive_to_replace = duplicate_drives[0]
+        else:
+            replace_idx = input(f"Which entry to replace (1-{len(duplicate_drives)}): ").strip()
+            try:
+                idx = int(replace_idx) - 1
+                if 0 <= idx < len(duplicate_drives):
+                    drive_to_replace = duplicate_drives[idx]
+                else:
+                    print("Invalid selection, creating new entry")
+                    return new_drive_info
+            except ValueError:
+                print("Invalid input, creating new entry")
+                return new_drive_info
+        
+        # Keep the existing ID and add any custom label that was previously set
+        new_drive_info["id"] = drive_to_replace["id"]
+        if drive_to_replace.get("label") and drive_to_replace["label"] != drive_to_replace["volume_name"]:
+            if not new_drive_info.get("label"):
+                print(f"Using previous custom label: {drive_to_replace['label']}")
+                new_drive_info["label"] = drive_to_replace["label"]
+            else:
+                print(f"Keeping new label: {new_drive_info['label']}")
+        
+        # Clear existing files (optional - confirm with user)
+        clear_files = input("Clear existing files for this drive? (y/n): ").strip().lower()
+        if clear_files == 'y':
+            delete_files_for_drive(drive_to_replace["id"])
+            print(f"Deleted existing files for drive {drive_to_replace['id']}")
+        else:
+            print("Keeping existing files - new/changed files will be updated")
+        
+        print(f"Replacing drive entry with ID: {new_drive_info['id']}")
+        return new_drive_info
+    
+    elif choice == "2":
+        print("Creating a new drive entry")
+        return new_drive_info
+    
+    else:  # choice == "3" or any other input
+        print("Canceling operation")
+        return None
+
+def get_file_count_for_drive(drive_id):
+    """Get the number of files cataloged for a given drive"""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=60.0)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM files WHERE drive_id = ?", (drive_id,))
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count
+    except Exception as e:
+        print(f"Error getting file count: {e}")
+        return 0
+
+def delete_files_for_drive(drive_id):
+    """Delete all files associated with a drive"""
+    try:
+        conn = sqlite3.connect(DB_PATH, timeout=60.0)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM files WHERE drive_id = ?", (drive_id,))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"Error deleting files: {e}")
 
 def get_drive_info(mount_point):
     """Get drive information at the specified mount point"""
@@ -152,7 +304,7 @@ def get_drive_info(mount_point):
         except Exception as e:
             print(f"Error getting file system type: {e}")
     
-    return {
+    drive_info = {
         "id": str(uuid.uuid4()),
         "volume_name": volume_name,
         "size_bytes": size_bytes,
@@ -161,6 +313,15 @@ def get_drive_info(mount_point):
         "mount_point": mount_point,
         "date_cataloged": datetime.datetime.now().isoformat()
     }
+    
+    # Check for duplicates
+    duplicates = check_for_duplicate_drive(volume_name, mount_point, size_bytes)
+    if duplicates:
+        # Handle duplicates (via user interaction)
+        updated_info = handle_duplicate_drive(duplicates, drive_info)
+        return updated_info
+    
+    return drive_info
 
 def calculate_checksum(file_path, algorithm="md5", buffer_size=8192):
     """Calculate file checksum using specified algorithm"""
@@ -223,6 +384,11 @@ def generate_video_thumbnail(video_path, output_dir=None, width=320, height=240)
         Path to the generated thumbnail or None if failed
     """
     try:
+        # Check if file is an R3D file
+        if video_path.lower().endswith('.r3d'):
+            return generate_r3d_thumbnail(video_path, output_dir, width, height)
+            
+        # For other video formats, use ffmpeg
         # Check if ffmpeg is available
         subprocess.run(
             ["ffmpeg", "-version"], 
@@ -292,10 +458,152 @@ def generate_video_thumbnail(video_path, output_dir=None, width=320, height=240)
         print(f"Unexpected error generating thumbnail: {e}")
         return None
 
+def generate_r3d_thumbnail(r3d_path, output_dir=None, width=320, height=240):
+    """
+    Generate a thumbnail from an R3D file using ffmpeg
+    
+    Args:
+        r3d_path: Path to the R3D file
+        output_dir: Directory to save thumbnail (defaults to media-asset-tracker/thumbnails)
+        width: Thumbnail width
+        height: Thumbnail height
+        
+    Returns:
+        Path to the generated thumbnail or None if failed
+    """
+    # R3D files can be large and cause database locking issues
+    # Skip thumbnail generation if the file is too large
+    try:
+        file_size = os.path.getsize(r3d_path)
+        # If larger than 1GB, skip thumbnail generation
+        if file_size > 1024*1024*1024:
+            print(f"Skipping thumbnail for large R3D file ({file_size/(1024**3):.2f} GB): {r3d_path}")
+            return None
+    except Exception as e:
+        print(f"Error checking R3D file size: {e}")
+    
+    # Note: The RED SDK integration requires compilation with specific flags
+    # For now, we'll use ffmpeg which works with most R3D files
+    print(f"Generating thumbnail for R3D file: {r3d_path}")
+    print("Using ffmpeg for R3D thumbnails (RED SDK integration pending)")
+    try:
+        return generate_video_thumbnail_with_ffmpeg(r3d_path, output_dir, width, height)
+    except Exception as e:
+        print(f"Error generating R3D thumbnail: {e}")
+        return None
+    
+    # The following code can be uncommented once the RED SDK is properly integrated:
+    """
+    try:
+        # Create output directory if it doesn't exist
+        if output_dir is None:
+            output_dir = os.path.expanduser("~/media-asset-tracker/thumbnails")
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Generate unique thumbnail filename
+        file_basename = os.path.basename(r3d_path)
+        thumbnail_name = f"{os.path.splitext(file_basename)[0]}_{uuid.uuid4().hex[:8]}.jpg"
+        thumbnail_path = os.path.join(output_dir, thumbnail_name)
+        
+        # Path to the R3D SDK sample executable
+        sdk_path = os.path.expanduser("~/Documents/Claude/Projects/hardware-infrastructure/vaultkeeper/R3DSDKv8_6_0")
+        sample_exec_path = os.path.join(sdk_path, "Sample code/CPU decoding/CPUDecodeSample")
+        
+        # Create temporary script to extract thumbnail
+        temp_script_path = os.path.join(output_dir, "extract_r3d_thumb.sh")
+        with open(temp_script_path, "w") as f:
+            f.write(f\"\"\"#!/bin/bash
+export LD_LIBRARY_PATH={sdk_path}/Redistributable/linux
+{sample_exec_path} "{r3d_path}" "{thumbnail_path}" {width} {height} 1 1
+\"\"\")
+        
+        # Make the script executable
+        os.chmod(temp_script_path, 0o755)
+        
+        # Execute the script
+        try:
+            subprocess.run(
+                [temp_script_path],
+                check=True,
+                capture_output=True,
+                text=True
+            )
+            
+            # Check if thumbnail was created
+            if os.path.exists(thumbnail_path):
+                print(f"R3D thumbnail generated: {thumbnail_path}")
+                return thumbnail_path
+            else:
+                print("R3D thumbnail generation failed")
+                return None
+                
+        except subprocess.CalledProcessError as e:
+            print(f"Error running R3D SDK sample: {e}")
+            print(f"Stdout: {e.stdout}")
+            print(f"Stderr: {e.stderr}")
+            
+            # Fall back to using ffmpeg if R3D SDK fails
+            print("Falling back to ffmpeg for R3D thumbnail")
+            return generate_video_thumbnail_with_ffmpeg(r3d_path, output_dir, width, height)
+            
+        finally:
+            # Clean up temporary script
+            if os.path.exists(temp_script_path):
+                os.remove(temp_script_path)
+            
+    except Exception as e:
+        print(f"Error in R3D thumbnail generation: {e}")
+        # Fall back to using ffmpeg
+        print("Falling back to ffmpeg for R3D thumbnail")
+        return generate_video_thumbnail_with_ffmpeg(r3d_path, output_dir, width, height)
+    """
+
+def generate_video_thumbnail_with_ffmpeg(video_path, output_dir, width, height):
+    """Fallback method to generate thumbnail using ffmpeg for any video format"""
+    try:
+        # Create output directory if it doesn't exist
+        if output_dir is None:
+            output_dir = os.path.expanduser("~/media-asset-tracker/thumbnails")
+        
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # Generate unique thumbnail filename
+        file_basename = os.path.basename(video_path)
+        thumbnail_name = f"{os.path.splitext(file_basename)[0]}_{uuid.uuid4().hex[:8]}.jpg"
+        thumbnail_path = os.path.join(output_dir, thumbnail_name)
+        
+        # Try to extract a frame using ffmpeg
+        subprocess.run(
+            [
+                "ffmpeg", 
+                "-y",  # Overwrite output files
+                "-i", video_path,  # Input file
+                "-vframes", "1",  # Extract one frame
+                "-q:v", "2",  # Quality (2 is high, 31 is low)
+                "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",  # Scale and pad
+                thumbnail_path  # Output file
+            ],
+            capture_output=True,
+            check=True
+        )
+        
+        return thumbnail_path
+    except Exception as e:
+        print(f"Fallback thumbnail generation failed: {e}")
+        return None
+
 def catalog_files(drive_info, conn=None):
     """Catalog all files on the drive and store in database"""
+    # Check if drive_info is None (operation cancelled during duplicate handling)
+    if drive_info is None:
+        print("Cataloging cancelled - no changes made.")
+        return 0
+        
     if conn is None:
-        conn = sqlite3.connect(DB_PATH)
+        # Set timeout to 60 seconds and enable WAL mode for better concurrency
+        conn = sqlite3.connect(DB_PATH, timeout=60.0)
+        conn.execute('PRAGMA journal_mode=WAL')
     cursor = conn.cursor()
     
     print("\n=== CATALOGING PROCESS STARTED ===")
@@ -352,8 +660,12 @@ def catalog_files(drive_info, conn=None):
     update_interval = datetime.timedelta(seconds=1)  # Update every second
     
     for root, dirs, files in os.walk(mount_point):
-        # Skip hidden directories
-        dirs[:] = [d for d in dirs if not d.startswith('.')]
+        # Skip hidden directories and Final Cut Pro bundle internals
+        dirs[:] = [d for d in dirs if not d.startswith('.') and not (d.endswith('.fcpbundle') or '.fcpcache' in d)]
+        
+        # Skip .fcpbundle bundle internals if we're already inside one 
+        if '.fcpbundle/' in root or '.fcpcache/' in root:
+            continue
         
         current_dir = os.path.relpath(root, mount_point)
         if current_dir == ".":
@@ -369,8 +681,8 @@ def catalog_files(drive_info, conn=None):
             file_path = os.path.join(root, filename)
             rel_path = os.path.relpath(file_path, mount_point)
             
-            # Skip system files
-            if any(part.startswith('.') for part in rel_path.split(os.path.sep)):
+            # Skip system files and Final Cut Pro internal files
+            if any(part.startswith('.') for part in rel_path.split(os.path.sep)) or '.fcpbundle/' in rel_path or '.fcpcache/' in rel_path:
                 skipped_count += 1
                 continue
                 
@@ -455,8 +767,8 @@ def catalog_files(drive_info, conn=None):
                     # Clear previous line and print updated progress
                     print(f"\rProgress: {total_files}/{file_count} files ({progress:.1f}%) | {files_per_sec:.1f} files/sec | {total_size/(1024**3):.2f} GB indexed", end="", flush=True)
                 
-                # Commit every 1000 files to avoid huge transactions
-                if total_files % 1000 == 0:
+                # Commit more frequently for large file collections to reduce locking
+                if total_files % 100 == 0:
                     conn.commit()
                 
             except Exception as e:
@@ -734,6 +1046,137 @@ def add_files_to_project(project_id, file_paths=None, search_pattern=None):
     
     return files_added
 
+def clean_duplicate_drives():
+    """Interactive tool to clean up duplicate drive entries"""
+    print("\n=== DUPLICATE DRIVE CLEANUP UTILITY ===")
+    
+    # Connect to database
+    conn = sqlite3.connect(DB_PATH, timeout=60.0)
+    conn.execute('PRAGMA journal_mode=WAL')
+    cursor = conn.cursor()
+    
+    # Find all duplicate drives
+    cursor.execute("""
+    SELECT volume_name, COUNT(*) as count
+    FROM drives
+    GROUP BY volume_name
+    HAVING count > 1
+    ORDER BY count DESC
+    """)
+    duplicates = cursor.fetchall()
+    
+    if not duplicates:
+        print("No duplicate drives found!")
+        conn.close()
+        return
+    
+    print(f"\nFound {len(duplicates)} drives with duplicate entries:")
+    for volume_name, count in duplicates:
+        print(f"  - {volume_name} ({count} entries)")
+    
+    print("\nStarting interactive cleanup...")
+    
+    # Process each duplicate set
+    for volume_name, count in duplicates:
+        print(f"\n=== Processing duplicates for: {volume_name} ===")
+        
+        # Get all drives with this volume name
+        cursor.execute("SELECT * FROM drives WHERE volume_name = ?", (volume_name,))
+        drive_rows = cursor.fetchall()
+        
+        # Convert to dictionaries
+        column_names = [description[0] for description in cursor.description]
+        drives = []
+        
+        for row in drive_rows:
+            drive_dict = {column_names[i]: row[i] for i in range(len(column_names))}
+            
+            # Get the file count for this drive
+            cursor.execute("SELECT COUNT(*) FROM files WHERE drive_id = ?", (drive_dict['id'],))
+            file_count = cursor.fetchone()[0]
+            drive_dict['file_count'] = file_count
+            
+            drives.append(drive_dict)
+        
+        # Display drive entries
+        print(f"\nFound {len(drives)} entries for '{volume_name}':")
+        for i, drive in enumerate(drives):
+            catalog_date = drive.get('date_cataloged', 'Unknown date')
+            # Parse date for better display
+            try:
+                date_obj = datetime.datetime.fromisoformat(catalog_date)
+                catalog_date = date_obj.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                pass
+                
+            print(f"{i+1}. ID: {drive.get('id')}")
+            print(f"   Label: {drive.get('label') or drive.get('volume_name')}")
+            print(f"   Size: {drive.get('size_bytes', 0) / (1024**3):.2f} GB")
+            print(f"   Cataloged: {catalog_date}")
+            print(f"   Files: {drive.get('file_count', 0)}")
+            print()
+        
+        print("Options:")
+        print("1) Keep one entry and delete others")
+        print("2) Skip this drive (no changes)")
+        print("3) Exit cleanup tool")
+        
+        choice = input("\nYour choice (1-3): ").strip()
+        
+        if choice == "1":
+            keep_idx = input(f"Which entry to keep (1-{len(drives)}): ").strip()
+            try:
+                idx = int(keep_idx) - 1
+                if 0 <= idx < len(drives):
+                    drive_to_keep = drives[idx]
+                    
+                    # Ask about file handling
+                    file_choice = input("\nHow to handle files for deleted entries?\n" +
+                                      "1) Delete all files from other entries\n" +
+                                      "2) Keep files but reassign to the kept entry\n" +
+                                      "Your choice (1-2): ").strip()
+                    
+                    reassign_files = (file_choice == "2")
+                    
+                    # Process the deletion
+                    for i, drive in enumerate(drives):
+                        if i != idx:
+                            print(f"Processing entry {i+1}...")
+                            if reassign_files:
+                                # Update files to point to the kept drive
+                                cursor.execute("""
+                                UPDATE files 
+                                SET drive_id = ? 
+                                WHERE drive_id = ?
+                                """, (drive_to_keep['id'], drive['id']))
+                                print(f"  - Reassigned files to kept drive ID: {drive_to_keep['id']}")
+                            else:
+                                # Delete the files
+                                cursor.execute("DELETE FROM files WHERE drive_id = ?", (drive['id'],))
+                                print(f"  - Deleted {drive.get('file_count', 0)} files")
+                            
+                            # Delete the drive entry
+                            cursor.execute("DELETE FROM drives WHERE id = ?", (drive['id'],))
+                            print(f"  - Deleted drive entry: {drive['id']}")
+                    
+                    conn.commit()
+                    print(f"\nKept entry {idx+1} and processed {len(drives)-1} other entries")
+                else:
+                    print("Invalid selection, skipping this drive")
+            except ValueError:
+                print("Invalid input, skipping this drive")
+        
+        elif choice == "3":
+            print("Exiting cleanup tool")
+            break
+        else:
+            print("Skipping this drive")
+    
+    # Final commit and cleanup
+    conn.commit()
+    conn.close()
+    print("\nCleanup process completed!")
+
 def main():
     """Main function to handle command line arguments"""
     parser = argparse.ArgumentParser(
@@ -744,6 +1187,14 @@ def main():
     
     # Initialize database
     init_parser = subparsers.add_parser("init", help="Initialize the database")
+    init_parser.add_argument(
+        "--force", 
+        action="store_true",
+        help="Force reinitialize database and fix column issues"
+    )
+    
+    # Cleanup command for managing duplicate entries
+    cleanup_parser = subparsers.add_parser("cleanup", help="Clean up duplicate drive entries")
     
     # Catalog drive
     catalog_parser = subparsers.add_parser("catalog", help="Catalog a drive")
@@ -825,7 +1276,53 @@ def main():
             return
     
     # Execute command
-    if args.command == "catalog":
+    if args.command == "init" and args.force:
+        # Add any specific database fixes here
+        print("Checking and fixing database columns...")
+        conn = sqlite3.connect(DB_PATH, timeout=60.0)
+        conn.execute('PRAGMA journal_mode=WAL')
+        cursor = conn.cursor()
+        
+        # Check if thumbnail_path column exists, if not add it
+        cursor.execute("PRAGMA table_info(files)")
+        columns = cursor.fetchall()
+        column_names = [column[1] for column in columns]
+        
+        if 'thumbnail_path' not in column_names:
+            print("Adding thumbnail_path column to files table...")
+            cursor.execute("ALTER TABLE files ADD COLUMN thumbnail_path TEXT")
+            conn.commit()
+            print("Fixed missing thumbnail_path column")
+        else:
+            print("thumbnail_path column already exists")
+        
+        # Check for duplicate drives based on volume name
+        print("\nChecking for duplicate drive entries...")
+        cursor.execute("SELECT volume_name, COUNT(*) FROM drives GROUP BY volume_name HAVING COUNT(*) > 1")
+        duplicates = cursor.fetchall()
+        
+        if duplicates:
+            print("\nFound duplicate entries for the following drives:")
+            for volume_name, count in duplicates:
+                print(f"  - {volume_name} ({count} entries)")
+            
+            print("\nOptions:")
+            print("1) Launch interactive cleanup tool")
+            print("2) Continue without cleanup")
+            
+            choice = input("\nYour choice (1-2): ").strip()
+            if choice == "1":
+                clean_duplicate_drives()
+        else:
+            print("No duplicate drives found.")
+            
+        conn.close()
+        
+    elif args.command == "cleanup":
+        # Special command for cleaning up duplicate drives
+        clean_duplicate_drives()
+        
+    elif args.command == "catalog":
         print(f"Cataloging drive at {args.mount_point}...")
         drive_info = get_drive_info(args.mount_point)
         if drive_info:
