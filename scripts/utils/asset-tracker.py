@@ -18,6 +18,10 @@ from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 import mimetypes
 import uuid
+import tempfile
+import whisper
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 # Initialize mime types
 mimetypes.init()
@@ -65,6 +69,9 @@ def init_db():
         mime_type TEXT,
         media_info TEXT,
         thumbnail_path TEXT,
+        transcription TEXT,
+        transcription_status TEXT,
+        transcription_date TEXT,
         FOREIGN KEY (drive_id) REFERENCES drives (id)
     )
     ''')
@@ -73,7 +80,7 @@ def init_db():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_drive_id ON files (drive_id)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_extension ON files (extension)')
     
-    # Check if thumbnail_path column exists, if not add it
+    # Check if required columns exist, if not add them
     cursor.execute("PRAGMA table_info(files)")
     columns = cursor.fetchall()
     column_names = [column[1] for column in columns]
@@ -81,6 +88,12 @@ def init_db():
     if 'thumbnail_path' not in column_names:
         print("Adding thumbnail_path column to files table...")
         cursor.execute("ALTER TABLE files ADD COLUMN thumbnail_path TEXT")
+    
+    if 'transcription' not in column_names:
+        print("Adding transcription columns to files table...")
+        cursor.execute("ALTER TABLE files ADD COLUMN transcription TEXT")
+        cursor.execute("ALTER TABLE files ADD COLUMN transcription_status TEXT")
+        cursor.execute("ALTER TABLE files ADD COLUMN transcription_date TEXT")
     
     # Projects table to organize files
     cursor.execute('''
@@ -110,6 +123,7 @@ def init_db():
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_extension ON files (extension)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_projects_name ON projects (name)')
     cursor.execute('CREATE INDEX IF NOT EXISTS idx_projects_client ON projects (client)')
+    cursor.execute('CREATE INDEX IF NOT EXISTS idx_files_transcription ON files (transcription_status)')
     
     conn.commit()
     conn.close()
@@ -491,6 +505,103 @@ def generate_r3d_thumbnail(r3d_path, output_dir=None, width=320, height=240):
     except Exception as e:
         print(f"Error generating R3D thumbnail: {e}")
         return None
+
+def transcribe_audio(file_path, language="auto", model_size="base"):
+    """
+    Generate transcription for audio or video file using Whisper
+    
+    Args:
+        file_path: Path to the audio or video file
+        language: Language code or "auto" for automatic detection
+        model_size: Whisper model size (tiny, base, small, medium, large)
+        
+    Returns:
+        Dictionary with transcription data or None if failed
+    """
+    try:
+        print(f"Loading Whisper model '{model_size}'...")
+        model = whisper.load_model(model_size)
+        
+        # Check if file is an audio file or needs extraction
+        mime_type = mimetypes.guess_type(file_path)[0] or ""
+        
+        # For video files or RED files, extract audio first
+        if mime_type.startswith("video/") or file_path.lower().endswith('.r3d'):
+            print(f"Extracting audio from {os.path.basename(file_path)}...")
+            
+            # Create a temporary WAV file
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp_audio_file:
+                temp_audio_path = temp_audio_file.name
+            
+            try:
+                # Extract audio using ffmpeg
+                subprocess.run([
+                    "ffmpeg",
+                    "-y",  # Overwrite output files
+                    "-i", file_path,  # Input file
+                    "-vn",  # Disable video
+                    "-acodec", "pcm_s16le",  # Convert to PCM WAV
+                    "-ar", "16000",  # 16kHz sample rate (what Whisper expects)
+                    "-ac", "1",  # Mono audio
+                    temp_audio_path  # Output file
+                ], check=True, capture_output=True)
+                
+                # Use the extracted audio
+                transcription_file = temp_audio_path
+            except Exception as e:
+                print(f"Error extracting audio: {e}")
+                if os.path.exists(temp_audio_path):
+                    os.unlink(temp_audio_path)
+                return None
+        else:
+            # Use the original file for audio files
+            transcription_file = file_path
+        
+        # Check for matching separate WAV audio file (common with RED footage)
+        if file_path.lower().endswith('.r3d'):
+            possible_wav = os.path.splitext(file_path)[0] + '.wav'
+            if os.path.exists(possible_wav):
+                print(f"Found matching WAV file for R3D: {possible_wav}")
+                transcription_file = possible_wav
+                # Delete temporary extracted audio file if we're using the WAV instead
+                if 'temp_audio_path' in locals() and os.path.exists(temp_audio_path):
+                    os.unlink(temp_audio_path)
+        
+        # Transcribe the audio
+        print(f"Transcribing audio with Whisper ({model_size} model)...")
+        options = {"language": language} if language != "auto" else {}
+        
+        try:
+            result = model.transcribe(transcription_file, **options)
+        except RuntimeError as e:
+            if "CUDA" in str(e):
+                print("CUDA error detected. Falling back to CPU...")
+                # Try again with CPU device
+                result = model.transcribe(transcription_file, device="cpu", **options)
+            else:
+                raise
+        
+        # Clean up temporary file if it exists
+        if 'temp_audio_path' in locals() and os.path.exists(temp_audio_path):
+            os.unlink(temp_audio_path)
+        
+        # Prepare result
+        transcription_data = {
+            "text": result["text"],
+            "segments": result["segments"],
+            "language": result.get("language", "unknown"),
+            "model": model_size,
+            "processing_date": datetime.datetime.now().isoformat()
+        }
+        
+        return transcription_data
+        
+    except ImportError:
+        print("Whisper not installed - transcription skipped")
+        return None
+    except Exception as e:
+        print(f"Transcription error: {e}")
+        return None
     
     # The following code can be uncommented once the RED SDK is properly integrated:
     """
@@ -734,13 +845,13 @@ def catalog_files(drive_info, conn=None):
                     if media_info:
                         print(f"\nExtracted media info for: {rel_path}")
                 
-                # Store file info in database
+                # Store file info in database without transcription (will be processed later)
                 cursor.execute('''
                 INSERT OR REPLACE INTO files (
                     id, drive_id, path, filename, extension, size_bytes, 
                     date_created, date_modified, checksum, mime_type, media_info,
-                    thumbnail_path
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    thumbnail_path, transcription_status
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', (
                     str(uuid.uuid4()),
                     drive_info["id"],
@@ -753,7 +864,8 @@ def catalog_files(drive_info, conn=None):
                     checksum,
                     mime_type,
                     media_info,
-                    thumbnail_path
+                    thumbnail_path,
+                    "pending" if (mime_type and (mime_type.startswith("video/") or mime_type.startswith("audio/"))) else None
                 ))
                 
                 total_files += 1
@@ -929,6 +1041,19 @@ def search_files(query, search_type="filename"):
         """
         cursor.execute(sql, (f"%{query}%", f"%{query}%"))
     
+    elif search_type == "transcription":
+        sql = """
+        SELECT f.*, d.label, d.volume_name 
+        FROM files f
+        JOIN drives d ON f.drive_id = d.id
+        WHERE 
+            f.transcription_status = 'completed' AND
+            f.transcription LIKE ?
+        ORDER BY f.date_modified DESC
+        LIMIT 100
+        """
+        cursor.execute(sql, (f"%{query}%",))
+    
     else:  # General search
         sql = """
         SELECT f.*, d.label, d.volume_name 
@@ -938,12 +1063,13 @@ def search_files(query, search_type="filename"):
             f.filename LIKE ? OR
             f.path LIKE ? OR
             d.label LIKE ? OR
-            d.volume_name LIKE ?
+            d.volume_name LIKE ? OR
+            (f.transcription_status = 'completed' AND f.transcription LIKE ?)
         ORDER BY f.date_modified DESC
         LIMIT 100
         """
         search_pattern = f"%{query}%"
-        cursor.execute(sql, (search_pattern, search_pattern, search_pattern, search_pattern))
+        cursor.execute(sql, (search_pattern, search_pattern, search_pattern, search_pattern, search_pattern))
     
     results = cursor.fetchall()
     conn.close()
@@ -1045,6 +1171,158 @@ def add_files_to_project(project_id, file_paths=None, search_pattern=None):
     conn.close()
     
     return files_added
+
+def process_transcriptions(drive_id=None, max_workers=2, model_size="base"):
+    """
+    Process transcriptions for pending audio and video files
+    
+    Args:
+        drive_id: Optional drive ID to limit processing to a specific drive
+        max_workers: Maximum number of parallel transcription workers
+        model_size: Whisper model size to use
+    
+    Returns:
+        Number of files processed
+    """
+    print("\n=== TRANSCRIPTION PROCESSING ===")
+    
+    # Connect to database
+    conn = sqlite3.connect(DB_PATH, timeout=60.0)
+    conn.execute('PRAGMA journal_mode=WAL')
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Find all pending transcriptions
+    if drive_id:
+        cursor.execute("""
+        SELECT id, drive_id, path, filename, extension, mime_type
+        FROM files
+        WHERE transcription_status = 'pending' AND drive_id = ?
+        ORDER BY size_bytes ASC
+        """, (drive_id,))
+    else:
+        cursor.execute("""
+        SELECT id, drive_id, path, filename, extension, mime_type
+        FROM files
+        WHERE transcription_status = 'pending'
+        ORDER BY size_bytes ASC
+        """)
+    
+    pending_files = cursor.fetchall()
+    
+    if not pending_files:
+        print("No pending transcriptions found!")
+        conn.close()
+        return 0
+    
+    print(f"Found {len(pending_files)} files needing transcription")
+    
+    # Function to process a single file
+    def process_file(file_data):
+        # Get drive mount point for the file
+        c = sqlite3.connect(DB_PATH, timeout=60.0)
+        c.row_factory = sqlite3.Row
+        file_cursor = c.cursor()
+        
+        file_cursor.execute("SELECT mount_point FROM drives WHERE id = ?", (file_data['drive_id'],))
+        drive_row = file_cursor.fetchone()
+        
+        if not drive_row:
+            print(f"Error: Drive not found for file {file_data['filename']}")
+            return False
+        
+        # Construct full path
+        mount_point = drive_row['mount_point']
+        full_path = os.path.join(mount_point, file_data['path'])
+        
+        if not os.path.exists(full_path):
+            print(f"Error: File not found: {full_path}")
+            # Update status to error
+            file_cursor.execute("""
+            UPDATE files
+            SET transcription_status = 'error', 
+                transcription_date = ?
+            WHERE id = ?
+            """, (datetime.datetime.now().isoformat(), file_data['id']))
+            c.commit()
+            c.close()
+            return False
+        
+        try:
+            # Mark as processing
+            file_cursor.execute("""
+            UPDATE files
+            SET transcription_status = 'processing', 
+                transcription_date = ?
+            WHERE id = ?
+            """, (datetime.datetime.now().isoformat(), file_data['id']))
+            c.commit()
+            
+            # Transcribe the file
+            print(f"\nTranscribing: {file_data['filename']}")
+            result = transcribe_audio(full_path, model_size=model_size)
+            
+            if result:
+                # Store result
+                file_cursor.execute("""
+                UPDATE files
+                SET transcription = ?,
+                    transcription_status = 'completed',
+                    transcription_date = ?
+                WHERE id = ?
+                """, (json.dumps(result), datetime.datetime.now().isoformat(), file_data['id']))
+                c.commit()
+                print(f"✓ Transcription completed: {file_data['filename']}")
+                return True
+            else:
+                # Update status to error
+                file_cursor.execute("""
+                UPDATE files
+                SET transcription_status = 'error',
+                    transcription_date = ?
+                WHERE id = ?
+                """, (datetime.datetime.now().isoformat(), file_data['id']))
+                c.commit()
+                print(f"✗ Transcription failed: {file_data['filename']}")
+                return False
+                
+        except Exception as e:
+            print(f"Error processing {file_data['filename']}: {e}")
+            # Update status to error
+            file_cursor.execute("""
+            UPDATE files
+            SET transcription_status = 'error',
+                transcription_date = ?
+            WHERE id = ?
+            """, (datetime.datetime.now().isoformat(), file_data['id']))
+            c.commit()
+            return False
+        finally:
+            c.close()
+    
+    # Process files in parallel
+    print(f"Starting transcription with {max_workers} parallel workers")
+    processed_count = 0
+    error_count = 0
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = []
+        for file_data in pending_files:
+            futures.append(executor.submit(process_file, dict(file_data)))
+        
+        for future in futures:
+            if future.result():
+                processed_count += 1
+            else:
+                error_count += 1
+    
+    print("\n=== TRANSCRIPTION SUMMARY ===")
+    print(f"Total files processed: {processed_count + error_count}")
+    print(f"Successful transcriptions: {processed_count}")
+    print(f"Failed transcriptions: {error_count}")
+    
+    conn.close()
+    return processed_count
 
 def clean_duplicate_drives():
     """Interactive tool to clean up duplicate drive entries"""
@@ -1196,6 +1474,25 @@ def main():
     # Cleanup command for managing duplicate entries
     cleanup_parser = subparsers.add_parser("cleanup", help="Clean up duplicate drive entries")
     
+    # Transcription command for processing media files
+    transcribe_parser = subparsers.add_parser("transcribe", help="Process transcriptions for audio/video files")
+    transcribe_parser.add_argument(
+        "-d", "--drive-id",
+        help="Optional drive ID to limit processing to a specific drive"
+    )
+    transcribe_parser.add_argument(
+        "-w", "--workers",
+        type=int,
+        default=2,
+        help="Number of parallel workers for transcription (default: 2)"
+    )
+    transcribe_parser.add_argument(
+        "-m", "--model",
+        choices=["tiny", "base", "small", "medium", "large"],
+        default="base",
+        help="Whisper model size to use (default: base)"
+    )
+    
     # Catalog drive
     catalog_parser = subparsers.add_parser("catalog", help="Catalog a drive")
     catalog_parser.add_argument(
@@ -1205,6 +1502,11 @@ def main():
     catalog_parser.add_argument(
         "-l", "--label", 
         help="Custom label for the drive"
+    )
+    catalog_parser.add_argument(
+        "-t", "--transcribe",
+        action="store_true",
+        help="Run transcription after cataloging"
     )
     
     # Generate QR code
@@ -1226,7 +1528,7 @@ def main():
     )
     search_parser.add_argument(
         "-t", "--type",
-        choices=["filename", "extension", "project", "any"],
+        choices=["filename", "extension", "project", "transcription", "any"],
         default="any",
         help="Type of search to perform"
     )
@@ -1263,6 +1565,13 @@ def main():
     add_files_parser.add_argument(
         "-p", "--pattern", 
         help="Search pattern to find files"
+    )
+    
+    # Show transcription
+    transcription_parser = subparsers.add_parser("show-transcription", help="Show full transcription for a file")
+    transcription_parser.add_argument(
+        "file_id",
+        help="File ID to show transcription for"
     )
     
     args = parser.parse_args()
@@ -1335,6 +1644,19 @@ def main():
             # Generate QR code
             qr_path = generate_qr_code(drive_info, args.label)
             print(f"QR code generated: {qr_path}")
+            
+            # Run transcription if requested
+            if args.transcribe:
+                print("\nStarting transcription process for newly cataloged files...")
+                process_transcriptions(drive_info["id"])
+                
+    elif args.command == "transcribe":
+        # Process transcriptions for audio/video files
+        process_transcriptions(
+            drive_id=args.drive_id, 
+            max_workers=args.workers,
+            model_size=args.model
+        )
         
     elif args.command == "qr":
         conn = sqlite3.connect(DB_PATH)
@@ -1367,6 +1689,35 @@ def main():
             print(f"   Path: {result['path']}")
             print(f"   Drive: {drive_label}")
             print(f"   Modified: {result['date_modified']}")
+            
+            # Show transcription snippet if this was a transcription search and we have one
+            if args.type == "transcription" and result.get('transcription'):
+                try:
+                    transcription_data = json.loads(result['transcription'])
+                    full_text = transcription_data.get('text', '')
+                    
+                    # Find the context around the search term
+                    search_term = args.query.lower()
+                    text_lower = full_text.lower()
+                    position = text_lower.find(search_term)
+                    
+                    if position != -1:
+                        # Extract a snippet (100 chars before and after the match)
+                        start = max(0, position - 100)
+                        end = min(len(full_text), position + len(search_term) + 100)
+                        snippet = full_text[start:end]
+                        
+                        # Add ellipsis if we've truncated
+                        if start > 0:
+                            snippet = "..." + snippet
+                        if end < len(full_text):
+                            snippet += "..."
+                        
+                        print(f"   Transcription: \"{snippet}\"")
+                        print(f"   Language: {transcription_data.get('language', 'unknown')}")
+                except (json.JSONDecodeError, KeyError):
+                    print("   Transcription: [Error parsing transcription data]")
+            
             print()
             
             if i >= 20:
@@ -1400,6 +1751,80 @@ def main():
             
         files_added = add_files_to_project(args.project_id, args.files, args.pattern)
         print(f"Added {files_added} files to project {args.project_id}")
+    
+    elif args.command == "show-transcription":
+        # Show full transcription for a file
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+        SELECT f.*, d.label, d.volume_name 
+        FROM files f
+        JOIN drives d ON f.drive_id = d.id
+        WHERE f.id = ?
+        """, (args.file_id,))
+        
+        file_data = cursor.fetchone()
+        
+        if not file_data:
+            print(f"Error: File with ID {args.file_id} not found")
+            conn.close()
+            return
+        
+        # Display file info
+        drive_label = file_data["label"] or file_data["volume_name"]
+        print(f"File: {file_data['filename']}")
+        print(f"Path: {file_data['path']}")
+        print(f"Drive: {drive_label}")
+        
+        # Check transcription status
+        if not file_data['transcription_status']:
+            print("This file has not been marked for transcription.")
+            conn.close()
+            return
+        
+        if file_data['transcription_status'] != 'completed':
+            print(f"Transcription status: {file_data['transcription_status']}")
+            print("No completed transcription available.")
+            conn.close()
+            return
+        
+        # Display transcription
+        try:
+            transcription_data = json.loads(file_data['transcription'])
+            print("\n=== TRANSCRIPTION ===")
+            print(f"Date: {file_data['transcription_date']}")
+            print(f"Language: {transcription_data.get('language', 'unknown')}")
+            print(f"Model: {transcription_data.get('model', 'unknown')}")
+            print("\nFull Text:")
+            print("-" * 80)
+            print(transcription_data.get('text', '[No text available]'))
+            print("-" * 80)
+            
+            # Ask if user wants to see segments
+            segments = transcription_data.get('segments', [])
+            if segments:
+                show_segments = input("\nShow detailed segments with timestamps? (y/n): ").strip().lower()
+                if show_segments == 'y':
+                    print("\n=== SEGMENTS ===")
+                    for i, segment in enumerate(segments, 1):
+                        start_time = segment.get('start', 0)
+                        end_time = segment.get('end', 0)
+                        text = segment.get('text', '')
+                        
+                        # Format as MM:SS.ms
+                        start_formatted = f"{int(start_time // 60):02}:{start_time % 60:06.3f}"
+                        end_formatted = f"{int(end_time // 60):02}:{end_time % 60:06.3f}"
+                        
+                        print(f"[{start_formatted} - {end_formatted}] {text}")
+        
+        except json.JSONDecodeError:
+            print("Error parsing transcription data.")
+        except Exception as e:
+            print(f"Error displaying transcription: {e}")
+            
+        conn.close()
     
     else:
         parser.print_help()

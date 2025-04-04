@@ -24,6 +24,7 @@ The core of the system, managing information about individual media files:
 - **Project Association**: Link assets to specific productions and clients
 - **Preview Generation**: View thumbnails or low-res proxies without accessing the physical drive
 - **Content Categorization**: Organize assets with tags, ratings, and categories
+- **Audio Transcription**: Automatically transcribe speech in video and audio files for searchable content
 
 ### 2. Storage Drive Tracking
 
@@ -61,6 +62,7 @@ VaultKeeper is built on a modern web architecture:
 - **Node.js/Express**: API server with RESTful endpoints
 - **MongoDB**: NoSQL database for flexible metadata storage
 - **Media Processing**: Automatic metadata extraction and preview generation
+- **Audio Transcription**: Whisper AI integration for speech-to-text conversion
 
 ### Frontend
 - **React**: Modern component-based UI
@@ -93,11 +95,12 @@ VaultKeeper is built on a modern web architecture:
 
 ### 3. Content Retrieval
 
-1. Search for specific assets by metadata, project, or other criteria
+1. Search for specific assets by metadata, project, or spoken content (via transcription)
 2. View thumbnails or proxies to confirm the right content
-3. Locate the physical drive using location information
-4. Check out the drive if needed or restore directly
-5. Return and check in drives after use
+3. Review audio transcriptions to find relevant dialogue or interview segments
+4. Locate the physical drive using location information
+5. Check out the drive if needed or restore directly
+6. Return and check in drives after use
 
 ### 4. Retention Management
 
@@ -109,11 +112,13 @@ VaultKeeper is built on a modern web architecture:
 ## System Benefits
 
 - **Time Savings**: Quickly locate any archived asset without hunting through drives
+- **Content Discovery**: Find footage by searching transcribed speech content
 - **Error Prevention**: Avoid loss of valuable media assets due to poor documentation
 - **Space Optimization**: Maximize efficient use of storage media
 - **Better Decision Making**: Make informed decisions about archive strategies
 - **Resource Planning**: Plan storage needs based on accurate usage data
 - **Standardization**: Consistent archiving procedures across projects and team members
+- **Interview Indexing**: Instantly find specific moments in interview footage using speech search
 
 ## Integration Points
 

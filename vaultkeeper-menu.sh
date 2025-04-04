@@ -2,7 +2,25 @@
 # VaultKeeper CLI Menu Interface
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-source "$SCRIPT_DIR/.venv/bin/activate"
+
+# Activate virtual environment if it exists
+if [ -d "$SCRIPT_DIR/.venv" ]; then
+  echo "Activating virtual environment..."
+  source "$SCRIPT_DIR/.venv/bin/activate"
+  
+  # Check for required packages
+  if ! python -c "import whisper" &> /dev/null; then
+    echo "Whisper not found, installing dependencies..."
+    pip install openai-whisper
+  fi
+else
+  echo "Warning: Virtual environment not found at $SCRIPT_DIR/.venv"
+  echo "Transcription features may not work correctly."
+  echo "Consider creating a virtual environment with: python -m venv .venv"
+  echo "Then install dependencies with: pip install openai-whisper qrcode pillow"
+  echo "Press Enter to continue anyway..."
+  read
+fi
 
 # Colors for better readability
 GREEN='\033[0;32m'
@@ -30,9 +48,12 @@ show_menu() {
   echo "  9) Run Shelf Drive Health Check"
   echo "  10) Full Process: Catalog + Health Check All Drives"
   echo "  11) Clean Up Duplicate Drive Entries"
-  echo "  12) Exit"
+  echo "  12) Process Transcriptions"
+  echo "  13) Search Transcriptions"
+  echo "  14) View Transcription for File"
+  echo "  15) Exit"
   echo
-  echo -e "${YELLOW}Enter your choice [1-12]:${NC} "
+  echo -e "${YELLOW}Enter your choice [1-15]:${NC} "
 }
 
 # Function to initialize the database
@@ -68,13 +89,28 @@ catalog_drive() {
   echo -e "${BLUE}Enter a label for the drive (optional):${NC}"
   read -e label
   
+  echo -e "${BLUE}Transcribe audio/video files while cataloging? (y/n):${NC}"
+  read -e do_transcribe
+  
+  # Build command based on options
   if [ -z "$label" ]; then
-    echo "Cataloging drive at $mount_point..."
-    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point"
+    cmd="python \"$SCRIPT_DIR/scripts/utils/asset-tracker.py\" catalog \"$mount_point\""
   else
-    echo "Cataloging drive at $mount_point with label $label..."
-    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label"
+    cmd="python \"$SCRIPT_DIR/scripts/utils/asset-tracker.py\" catalog \"$mount_point\" -l \"$label\""
   fi
+  
+  # Add transcription flag if requested
+  if [[ "$do_transcribe" =~ ^[Yy] ]]; then
+    cmd="$cmd -t"
+    echo -e "${YELLOW}Note: This will mark audio/video files for transcription.${NC}"
+    echo -e "${YELLOW}Includes non-music/SFX audio files that may be external recordings.${NC}"
+    echo "Cataloging drive at $mount_point with transcription enabled..."
+  else
+    echo "Cataloging drive at $mount_point..."
+  fi
+  
+  # Execute the command
+  eval $cmd
   
   echo "Press Enter to continue..."
   read
@@ -117,6 +153,25 @@ search_files() {
   
   echo "Searching for '$query' with type '$search_type'..."
   python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" search "$query" -t "$search_type"
+  echo "Press Enter to continue..."
+  read
+}
+
+# Function to search through transcriptions
+search_transcriptions() {
+  echo -e "${BLUE}Enter text to search for in transcriptions:${NC}"
+  read -e query
+  
+  if [ -z "$query" ]; then
+    echo "Search query cannot be empty."
+    echo "Press Enter to continue..."
+    read
+    return
+  fi
+  
+  echo "Searching transcriptions for '$query'..."
+  python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" search "$query" -t "transcription"
+  
   echo "Press Enter to continue..."
   read
 }
@@ -711,10 +766,20 @@ full_process() {
       # Create log file
       LOG_FILE_1="$LOG_DIR/drive_$(echo "$mount_point" | tr '/' '_').log"
       
+      # Ask about transcription
+      echo -e "${BLUE}Enable audio transcription for this drive? (y/n):${NC}"
+      read -e do_transcribe
+      
       # Start catalog in background
       echo "Starting cataloging in background..."
       echo "Logging output to: $LOG_FILE_1"
-      (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" > "$LOG_FILE_1" 2>&1) &
+      
+      if [[ "$do_transcribe" =~ ^[Yy] ]]; then
+        echo "Transcription enabled for this drive."
+        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t > "$LOG_FILE_1" 2>&1) &
+      else
+        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" > "$LOG_FILE_1" 2>&1) &
+      fi
       CATALOG_PID_1=$!
       
       # Check if we have a second drive to process
@@ -728,13 +793,23 @@ full_process() {
         echo -e "${BLUE}CATALOGING Drive #$((j+1)): $mount_point2 (Label: $label2)${NC}"
         echo -e "${GREEN}==================================================${NC}"
         
+        # Ask about transcription for second drive
+        echo -e "${BLUE}Enable audio transcription for this drive? (y/n):${NC}"
+        read -e do_transcribe2
+        
         # Create second log file
         LOG_FILE_2="$LOG_DIR/drive_$(echo "$mount_point2" | tr '/' '_').log"
         
         # Start second catalog in background
         echo "Starting cataloging in background..."
         echo "Logging output to: $LOG_FILE_2"
-        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" > "$LOG_FILE_2" 2>&1) &
+        
+        if [[ "$do_transcribe2" =~ ^[Yy] ]]; then
+          echo "Transcription enabled for this drive."
+          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" -t > "$LOG_FILE_2" 2>&1) &
+        else
+          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" > "$LOG_FILE_2" 2>&1) &
+        fi
         CATALOG_PID_2=$!
         
         # Wait for both catalog processes to complete
@@ -801,9 +876,19 @@ full_process() {
       echo -e "${BLUE}CATALOGING Drive #$((i+1)): $mount_point (Label: $label)${NC}"
       echo -e "${GREEN}==================================================${NC}"
       
+      # Ask about transcription
+      echo -e "${BLUE}Enable audio transcription for this drive? (y/n):${NC}"
+      read -e do_transcribe
+      
       # STEP 1: Catalog the drive
       echo "Starting cataloging..."
-      python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label"
+      
+      if [[ "$do_transcribe" =~ ^[Yy] ]]; then
+        echo "Transcription enabled for this drive."
+        python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t
+      else
+        python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label"
+      fi
       
       echo
       echo -e "${GREEN}==================================================${NC}"
@@ -828,6 +913,82 @@ cleanup_duplicates() {
   read
 }
 
+# Function to process transcriptions
+process_transcriptions() {
+  echo -e "${GREEN}=========================================${NC}"
+  echo -e "${GREEN}     Audio Transcription Processing      ${NC}"
+  echo -e "${GREEN}=========================================${NC}"
+  echo
+  
+  # Ask for drive ID (optional)
+  echo -e "${BLUE}Enter drive ID to process specific drive (leave empty for all pending files):${NC}"
+  read -e drive_id
+  
+  # Select Whisper model
+  echo -e "${BLUE}Select Whisper model size:${NC}"
+  echo "1) Base (default, good balance between speed and accuracy)"
+  echo "2) Tiny (fastest, lower accuracy)"
+  echo "3) Small (better accuracy, slower)"
+  echo "4) Medium (high accuracy, much slower)"
+  echo "5) Large (best accuracy, very slow)"
+  read -e model_choice
+  
+  # Map choice to model name
+  case $model_choice in
+    1) model="base" ;;
+    2) model="tiny" ;;
+    3) model="small" ;;
+    4) model="medium" ;;
+    5) model="large" ;;
+    *) model="base" ;;
+  esac
+  
+  # Select number of parallel workers
+  echo -e "${BLUE}Select number of parallel transcription workers (1-4, default: 2):${NC}"
+  read -e workers
+  
+  # Default to 2 workers if input is empty or invalid
+  if [ -z "$workers" ] || ! [[ "$workers" =~ ^[1-4]$ ]]; then
+    workers=2
+  fi
+  
+  # Build command
+  if [ -z "$drive_id" ]; then
+    echo "Processing all pending transcriptions with $model model using $workers workers..."
+    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" transcribe -m "$model" -w "$workers"
+  else
+    echo "Processing transcriptions for drive $drive_id with $model model using $workers workers..."
+    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" transcribe -d "$drive_id" -m "$model" -w "$workers"
+  fi
+  
+  echo "Press Enter to continue..."
+  read
+}
+
+# Function to view a specific transcription
+view_transcription() {
+  echo -e "${GREEN}=========================================${NC}"
+  echo -e "${GREEN}     View File Transcription             ${NC}"
+  echo -e "${GREEN}=========================================${NC}"
+  echo
+  
+  echo -e "${BLUE}Enter file ID:${NC}"
+  read -e file_id
+  
+  if [ -z "$file_id" ]; then
+    echo "File ID cannot be empty."
+    echo "Press Enter to continue..."
+    read
+    return
+  fi
+  
+  echo "Displaying transcription for file $file_id..."
+  python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" show-transcription "$file_id"
+  
+  echo "Press Enter to continue..."
+  read
+}
+
 # Main loop
 while true; do
   show_menu
@@ -845,7 +1006,10 @@ while true; do
     9) run_shelf_drive_check ;;
     10) full_process ;;
     11) cleanup_duplicates ;;
-    12) echo "Goodbye!"; exit 0 ;;
+    12) process_transcriptions ;;
+    13) search_transcriptions ;;
+    14) view_transcription ;;
+    15) echo "Goodbye!"; exit 0 ;;
     *) echo "Invalid option. Press Enter to continue..."; read ;;
   esac
 done
