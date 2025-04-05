@@ -13,7 +13,9 @@ VaultKeeper is a comprehensive system for cataloging, organizing, and tracking m
 - **Location Management**: Track physical shelf locations and drive check-out/check-in
 - **Batch Processing**: Catalog and health-check multiple drives in sequence
 - **Interactive CLI Menu**: User-friendly text-based menu interface
+- **Web-based GUI**: Search, browse thumbnails, and manage media assets through a web interface
 - **Transcription Search**: Find files by spoken content in audio tracks
+- **Client Management**: Assign files to clients and organize assets by project
 - **Flexible Storage Organization**: Place drives anywhere with QR-based tracking and location IDs
 - **NIIMBOT D101/B1 Support**: Direct or manual printing to NIIMBOT thermal label printers
 - **Location/Shelf QR Codes**: Generate location labels with matching QR codes
@@ -63,7 +65,7 @@ vaultkeeper/
 # Create a Python virtual environment (first time setup)
 python -m venv .venv
 source .venv/bin/activate
-pip install openai-whisper qrcode pillow
+pip install openai-whisper qrcode pillow flask flask-cors
 
 # Or just run the menu script which will check and activate the venv
 ./vaultkeeper-menu.sh
@@ -76,6 +78,11 @@ pip install openai-whisper qrcode pillow
 
 # Process transcriptions of audio/video files
 # Select option 11) Process Transcriptions
+
+# Start the web interface (optional)
+# Run the Flask server from the project root
+python web/server.py
+# Then open http://localhost:5000 in your browser
 ```
 
 ## Using the Menu Interface

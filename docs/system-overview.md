@@ -56,18 +56,20 @@ Handles the process of archiving and retrieving content:
 
 ## Technical Architecture
 
-VaultKeeper is built on a modern web architecture:
+VaultKeeper is built on a flexible architecture:
 
 ### Backend
-- **Node.js/Express**: API server with RESTful endpoints
-- **MongoDB**: NoSQL database for flexible metadata storage
-- **Media Processing**: Automatic metadata extraction and preview generation
+- **Python Core**: Robust core utilities for media processing and database operations
+- **SQLite**: Lightweight, embedded database for excellent performance and portability
+- **Flask API**: Optional web server for accessing the database via a RESTful API
+- **Media Processing**: ffmpeg-based metadata extraction and preview generation
 - **Audio Transcription**: Whisper AI integration for speech-to-text conversion
 
 ### Frontend
-- **React**: Modern component-based UI
-- **Material UI**: Consistent design system
-- **Responsive Design**: Works on desktop and mobile devices
+- **CLI Interface**: Feature-rich command-line interface for direct system access
+- **Web GUI**: Browser-based responsive interface for searching and managing assets
+- **Thumbnail Browser**: Visual tools for browsing media assets and previews
+- **Responsive Design**: Works on desktop and mobile devices through the web interface
 
 ### Hardware Integration
 - **NIIMBOT Printer**: Bluetooth label printer for QR codes
@@ -96,11 +98,13 @@ VaultKeeper is built on a modern web architecture:
 ### 3. Content Retrieval
 
 1. Search for specific assets by metadata, project, or spoken content (via transcription)
-2. View thumbnails or proxies to confirm the right content
-3. Review audio transcriptions to find relevant dialogue or interview segments
-4. Locate the physical drive using location information
-5. Check out the drive if needed or restore directly
-6. Return and check in drives after use
+2. Use the web interface to browse assets visually through thumbnails
+3. View thumbnails or proxies to confirm the right content
+4. Review audio transcriptions to find relevant dialogue or interview segments
+5. Assign files to clients or projects for better organization
+6. Locate the physical drive using location information
+7. Check out the drive if needed or restore directly
+8. Return and check in drives after use
 
 ### 4. Retention Management
 

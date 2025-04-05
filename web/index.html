@@ -1,11 +1,11 @@
-<\!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VaultKeeper - Media Asset Manager</title>
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="/css/styles.css">
+    <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
     <header>
@@ -13,82 +13,234 @@
             <div class="logo">VaultKeeper</div>
             <nav>
                 <ul>
-                    <li><a href="/">Dashboard</a></li>
-                    <li><a href="/drives">Drives</a></li>
-                    <li><a href="/assets">Assets</a></li>
-                    <li><a href="/reports">Reports</a></li>
+                    <li><a href="#query-tool" class="active" data-page="query-tool">Query Tool</a></li>
+                    <li><a href="#drives" data-page="drives">Drives</a></li>
+                    <li><a href="#projects" data-page="projects">Projects</a></li>
+                    <li><a href="#reports" data-page="reports">Reports</a></li>
                 </ul>
             </nav>
         </div>
     </header>
     
     <div class="container">
-        <div class="card">
-            <h2>Welcome to VaultKeeper</h2>
-            <p>Your comprehensive media asset tracking and cataloging system for archived files.</p>
-            <a href="/drives/register" class="button">Register New Drive</a>
+        <!-- Query Tool Page -->
+        <div id="page-query-tool" class="page active">
+            <div class="card">
+                <h2>Media Asset Query Tool</h2>
+                <p>Search and browse your cataloged media assets with advanced filtering options.</p>
+            </div>
+            
+            <div class="search-container card">
+                <div class="search-row">
+                    <input type="text" id="search-query" class="search-input" placeholder="Enter search terms...">
+                    <button id="search-button" class="button">Search</button>
+                </div>
+                
+                <div class="search-options">
+                    <div class="option-group">
+                        <label>Search in:</label>
+                        <select id="search-type">
+                            <option value="filename">Filename</option>
+                            <option value="extension">File Extension</option>
+                            <option value="any" selected>Any Field</option>
+                            <option value="project">Project</option>
+                        </select>
+                    </div>
+                    
+                    <div class="option-group">
+                        <label>
+                            <input type="checkbox" id="include-transcripts">
+                            Include transcripts in search
+                        </label>
+                    </div>
+                    
+                    <div class="option-group">
+                        <label>Drive:</label>
+                        <select id="drive-filter">
+                            <option value="">All Drives</option>
+                            <!-- Drive options will be populated by JavaScript -->
+                        </select>
+                    </div>
+                    
+                    <div class="option-group">
+                        <label>Client:</label>
+                        <select id="client-filter">
+                            <option value="">All Clients</option>
+                            <!-- Client options will be populated by JavaScript -->
+                        </select>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="card" id="results-container">
+                <h3>Search Results</h3>
+                <div id="results-count">0 results found</div>
+                
+                <div id="thumbnail-view">
+                    <!-- Thumbnails will be displayed here -->
+                </div>
+                
+                <table id="results-table">
+                    <thead>
+                        <tr>
+                            <th>Thumbnail</th>
+                            <th>Filename</th>
+                            <th>Drive</th>
+                            <th>Path</th>
+                            <th>Size</th>
+                            <th>Date Modified</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="results-body">
+                        <!-- Results will be inserted here by JavaScript -->
+                    </tbody>
+                </table>
+                
+                <div id="pagination">
+                    <!-- Pagination controls will be inserted here -->
+                </div>
+            </div>
+            
+            <div class="card" id="client-management">
+                <h3>Client Management</h3>
+                <div class="form-row">
+                    <input type="text" id="new-client-name" placeholder="Enter new client name">
+                    <button id="add-client-button" class="button">Add Client</button>
+                </div>
+                
+                <div id="client-assignment">
+                    <h4>Assign to Client</h4>
+                    <div class="form-row">
+                        <select id="client-select">
+                            <option value="">Select Client</option>
+                            <!-- Client options will be populated by JavaScript -->
+                        </select>
+                        <button id="assign-client-button" class="button secondary">Assign Selected Files</button>
+                    </div>
+                    <p class="note">Select files from the search results to assign them to a client.</p>
+                </div>
+            </div>
         </div>
         
-        <div class="dashboard-grid">
-            <div class="card status-card">
-                <div class="label">Total Drives</div>
-                <div class="number" id="total-drives">0</div>
+        <!-- Drives Page -->
+        <div id="page-drives" class="page">
+            <div class="card">
+                <h2>Drives Management</h2>
+                <p>View and manage your cataloged drives.</p>
             </div>
-            <div class="card status-card">
-                <div class="label">Healthy Drives</div>
-                <div class="number" id="healthy-drives">0</div>
-            </div>
-            <div class="card status-card">
-                <div class="label">Degraded Drives</div>
-                <div class="number" id="degraded-drives">0</div>
-            </div>
-            <div class="card status-card">
-                <div class="label">Failing Drives</div>
-                <div class="number" id="failing-drives">0</div>
+            
+            <div class="card">
+                <h3>All Cataloged Drives</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Label</th>
+                            <th>Volume Name</th>
+                            <th>Size</th>
+                            <th>Free Space</th>
+                            <th>Date Cataloged</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="drives-list">
+                        <tr>
+                            <td colspan="6">Loading drives...</td>
+                        </tr>
+                    </tbody>
+                </table>
             </div>
         </div>
         
-        <div class="card">
-            <h3>Storage Overview</h3>
-            <p><span id="used-storage">0</span> TB used of <span id="total-storage">0</span> TB total (<span id="used-percent">0</span>%)</p>
-            <p>Total media assets: <strong id="total-assets">0</strong></p>
+        <!-- Projects Page -->
+        <div id="page-projects" class="page">
+            <div class="card">
+                <h2>Projects Management</h2>
+                <p>View and manage your projects and client assignments.</p>
+            </div>
+            
+            <div class="card">
+                <h3>Create New Project</h3>
+                <div class="form-row">
+                    <input type="text" id="new-project-name" placeholder="Project Name">
+                    <input type="text" id="new-project-client" placeholder="Client">
+                    <button id="create-project-button" class="button">Create Project</button>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>All Projects</h3>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Project Name</th>
+                            <th>Client</th>
+                            <th>Date Created</th>
+                            <th>Files</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="projects-list">
+                        <tr>
+                            <td colspan="5">Loading projects...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
         </div>
         
-        <div class="card">
-            <h3>Recent Drives</h3>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Name</th>
-                        <th>Location</th>
-                        <th>Health</th>
-                        <th>Size</th>
-                        <th>Used</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody id="drives-table-body">
-                    <\!-- Drive rows will be inserted here by JavaScript -->
-                </tbody>
-            </table>
-            <a href="/drives" class="button secondary">View All Drives</a>
+        <!-- Reports Page -->
+        <div id="page-reports" class="page">
+            <div class="card">
+                <h2>Reports & Analytics</h2>
+                <p>Generate reports and analyze your media asset collection.</p>
+            </div>
+            
+            <div class="card">
+                <h3>Storage Usage by Drive</h3>
+                <div id="storage-chart" style="height: 300px; background-color: #f9f9f9; display: flex; align-items: center; justify-content: center;">
+                    Chart Placeholder - Storage Usage by Drive
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>File Types Distribution</h3>
+                <div id="filetype-chart" style="height: 300px; background-color: #f9f9f9; display: flex; align-items: center; justify-content: center;">
+                    Chart Placeholder - File Types Distribution
+                </div>
+            </div>
         </div>
-        
-        <div class="card">
-            <h3>Quick Actions</h3>
-            <a href="/drives/register" class="button">Register Drive</a>
-            <a href="/drives/batch-scan" class="button secondary">Batch Scan</a>
-            <a href="/reports" class="button secondary">Generate Report</a>
+    </div>
+    
+    <!-- Thumbnail Preview Modal -->
+    <div id="thumbnail-modal" class="modal">
+        <div class="modal-content">
+            <span class="close-modal">&times;</span>
+            <h3>Asset Preview</h3>
+            <div id="modal-content">
+                <img id="preview-image" src="" alt="Asset Preview">
+            </div>
+            <div id="modal-details">
+                <p><strong>Filename:</strong> <span id="modal-filename"></span></p>
+                <p><strong>Path:</strong> <span id="modal-path"></span></p>
+                <p><strong>Drive:</strong> <span id="modal-drive"></span></p>
+                <p><strong>Size:</strong> <span id="modal-size"></span></p>
+                <p><strong>Modified:</strong> <span id="modal-date"></span></p>
+            </div>
+            
+            <div id="modal-transcription">
+                <h4>Transcription</h4>
+                <div id="transcription-content"></div>
+            </div>
         </div>
     </div>
     
     <footer>
         <div class="container">
-            <p>VaultKeeper &copy; 2024 - Media Asset Management System</p>
-            <p>Remote access enabled: <a href="http://localhost:6080/vnc.html">GUI Access</a> | <a href="ssh://localhost:2222">SSH</a></p>
+            <p>VaultKeeper &copy; 2025 - Media Asset Management System</p>
         </div>
     </footer>
     
-    <script src="/js/app.js"></script>
+    <script src="js/app.js"></script>
 </body>
 </html>
