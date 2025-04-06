@@ -14,6 +14,7 @@ import argparse
 import json
 import subprocess
 import qrcode
+import re
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
 import mimetypes
@@ -434,7 +435,7 @@ def get_media_info(file_path):
         # ffprobe not installed
         return None
 
-def generate_video_thumbnail(video_path, output_dir=None, width=320, height=240):
+def generate_video_thumbnail(video_path, output_dir=None, width=640, height=480):
     """
     Generate a thumbnail from a video file by extracting a frame from the middle
     
@@ -450,7 +451,46 @@ def generate_video_thumbnail(video_path, output_dir=None, width=320, height=240)
     try:
         # Check if file is an R3D file
         if video_path.lower().endswith('.r3d'):
-            return generate_r3d_thumbnail(video_path, output_dir, width, height)
+            # R3D files are typically in an RDC folder structure with multiple chunks
+            # We only want one thumbnail per RDC folder (logical clip)
+            import glob
+            
+            # Extract the parent directory structure
+            file_dir = os.path.dirname(video_path)
+            parent_dir = os.path.dirname(file_dir)
+            
+            # Check if we're in an RDC folder structure
+            if os.path.basename(file_dir).upper() == "RDC" or "RDC" in file_dir:
+                # This is in an RDC folder - create a key based on the parent folder + RDC folder
+                # to identify this specific clip (not just the individual file chunk)
+                rdc_dir = file_dir
+                parent_name = os.path.basename(parent_dir)
+                rdc_name = os.path.basename(rdc_dir)
+                
+                # Create a thumbnail key based on the parent + RDC folder
+                rdc_key = f"{parent_name}_{rdc_name}"
+                
+                print(f"R3D file in RDC structure: {rdc_dir}")
+                print(f"Using RDC key: {rdc_key}")
+                
+                # Check if we already have a thumbnail for this RDC clip
+                if output_dir is None:
+                    output_dir = os.path.expanduser("~/media-asset-tracker/thumbnails")
+                
+                os.makedirs(output_dir, exist_ok=True)
+                existing_thumbs = glob.glob(os.path.join(output_dir, f"{rdc_key}_*.jpg"))
+                
+                if existing_thumbs:
+                    print(f"Found existing thumbnail for RDC folder: {rdc_dir}")
+                    # Return the existing thumbnail
+                    return existing_thumbs[0]
+                
+                # If we're here, we need to generate a new thumbnail
+                print(f"Generating new thumbnail for RDC folder: {rdc_dir}")
+                return generate_r3d_thumbnail(video_path, output_dir, width, height, rdc_key)
+            else:
+                # Standard R3D file not in RDC structure
+                return generate_r3d_thumbnail(video_path, output_dir, width, height)
             
         # For other video formats, use ffmpeg
         # Check if ffmpeg is available
@@ -522,15 +562,16 @@ def generate_video_thumbnail(video_path, output_dir=None, width=320, height=240)
         print(f"Unexpected error generating thumbnail: {e}")
         return None
 
-def generate_r3d_thumbnail(r3d_path, output_dir=None, width=320, height=240):
+def generate_r3d_thumbnail(r3d_path, output_dir=None, width=640, height=480, rdc_key=None):
     """
-    Generate a thumbnail from an R3D file using ffmpeg
+    Generate a thumbnail from an R3D file using REDline with fallback to ffmpeg
     
     Args:
         r3d_path: Path to the R3D file
         output_dir: Directory to save thumbnail (defaults to media-asset-tracker/thumbnails)
         width: Thumbnail width
         height: Thumbnail height
+        rdc_key: Optional RDC folder key for grouping R3D chunks
         
     Returns:
         Path to the generated thumbnail or None if failed
@@ -546,8 +587,6 @@ def generate_r3d_thumbnail(r3d_path, output_dir=None, width=320, height=240):
     except Exception as e:
         print(f"Error checking R3D file size: {e}")
     
-    # Note: The RED SDK integration requires compilation with specific flags
-    # For now, we'll use a more compatible ffmpeg approach for R3D files
     print(f"Generating thumbnail for R3D file: {r3d_path}")
     
     try:
@@ -557,67 +596,193 @@ def generate_r3d_thumbnail(r3d_path, output_dir=None, width=320, height=240):
         
         os.makedirs(output_dir, exist_ok=True)
         
-        # Generate unique thumbnail filename
-        file_basename = os.path.basename(r3d_path)
-        thumbnail_name = f"{os.path.splitext(file_basename)[0]}_{uuid.uuid4().hex[:8]}.jpg"
+        # Generate thumbnail filename - use RDC key if provided
+        if rdc_key:
+            # Use RDC folder key to identify the clip rather than individual R3D file
+            thumbnail_name = f"{rdc_key}_{uuid.uuid4().hex[:8]}.jpg"
+            print(f"Using RDC-based thumbnail name: {thumbnail_name}")
+        else:
+            # Use individual file name
+            file_basename = os.path.basename(r3d_path)
+            thumbnail_name = f"{os.path.splitext(file_basename)[0]}_{uuid.uuid4().hex[:8]}.jpg"
+            
         thumbnail_path = os.path.join(output_dir, thumbnail_name)
         
-        # Try different ffmpeg flags for R3D compatibility
-        print("Trying specialized ffmpeg flags for R3D files...")
+        # First try using REDline to generate the thumbnail
+        redline_success = False
         try:
-            # First attempt: Use special flags for RED files
-            subprocess.run(
-                [
-                    "ffmpeg", 
-                    "-y",  # Overwrite output files
-                    "-vsync", "0",  # Avoid frame rate sync issues
-                    "-probesize", "100M",  # Larger probe size for complex formats
-                    "-analyzeduration", "100M",  # Longer analyze duration
-                    "-i", r3d_path,  # Input file
-                    "-vframes", "1",  # Extract one frame
-                    "-q:v", "2",  # Quality (2 is high, 31 is low)
-                    "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",  # Scale and pad
-                    thumbnail_path  # Output file
-                ],
-                capture_output=True,
-                check=True,
-                timeout=60  # Add timeout to avoid hanging
-            )
+            # Locate REDline executable
+            redline_paths = [
+                "/usr/local/bin/REDline",  # Default system-wide install
+                "/opt/RED/REDline/REDline",  # Alternative install location
+                os.path.expanduser("~/RED/REDline/REDline"),  # User install location
+                os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../REDline/REDline")),  # Local install
+            ]
             
-            # Verify the thumbnail was created successfully
-            if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
-                print(f"Successfully created R3D thumbnail: {thumbnail_path}")
-                return thumbnail_path
+            redline_path = None
+            for path in redline_paths:
+                if os.path.exists(path):
+                    redline_path = path
+                    break
+            
+            if redline_path:
+                print(f"Using REDline at: {redline_path}")
+                
+                # Use REDline with proper commands to extract a JPEG from the middle frame
+                cmd = [
+                    redline_path,
+                    "--i", r3d_path,          # Input file
+                    "--format", "3",          # JPEG format
+                    "--start", "50%",         # Start at the middle of the clip
+                    "--frameCount", "1",      # Only extract one frame
+                    "--resizeX", str(width),  # Resize X dimension
+                    "--resizeY", str(height), # Resize Y dimension
+                    "--o", thumbnail_path     # Output file
+                ]
+                
+                print(f"Running REDline command: {' '.join(cmd)}")
+                
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    check=False,  # Don't raise exception on error
+                    timeout=180   # Allow longer timeout for R3D processing (3 minutes)
+                )
+                
+                # Check if thumbnail was created
+                if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+                    print(f"Successfully created R3D thumbnail with REDline: {thumbnail_path}")
+                    redline_success = True
+                    return thumbnail_path
+                else:
+                    print(f"REDline command failed with code: {result.returncode}")
+                    if result.stdout:
+                        print(f"REDline output: {result.stdout}")
+                    if result.stderr:
+                        print(f"REDline error: {result.stderr}")
+                    
+                    # Try alternative approach with single frame and trim
+                    alt_cmd = [
+                        redline_path,
+                        "--i", r3d_path,         # Input file
+                        "--format", "3",         # JPEG format
+                        "--start", "1",          # Start at first frame
+                        "--frameCount", "1",     # Only process one frame
+                        "--resizeX", str(width), # Resize X dimension
+                        "--resizeY", str(height),# Resize Y dimension
+                        "--o", thumbnail_path    # Output file
+                    ]
+                    
+                    print(f"Trying alternative REDline command: {' '.join(alt_cmd)}")
+                    
+                    alt_result = subprocess.run(
+                        alt_cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=180  # 3 minutes timeout
+                    )
+                    
+                    # Check if thumbnail was created
+                    if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+                        print(f"Successfully created R3D thumbnail with alternative REDline command: {thumbnail_path}")
+                        redline_success = True
+                        return thumbnail_path
+            else:
+                print("REDline executable not found, skipping REDline approach")
+                
         except subprocess.TimeoutExpired:
-            print("Thumbnail generation timed out, trying simpler approach...")
+            print("REDline thumbnail generation timed out")
         except Exception as e:
-            print(f"First ffmpeg attempt failed: {e}")
-            
-        # Second attempt: Use simpler ffmpeg command
-        try:
-            subprocess.run(
-                [
-                    "ffmpeg", 
-                    "-y",  # Overwrite output files
-                    "-i", r3d_path,  # Input file
-                    "-vframes", "1",  # Extract one frame
-                    thumbnail_path  # Output file
-                ],
-                capture_output=True,
-                check=True,
-                timeout=60  # Add timeout to avoid hanging
-            )
-            
-            # Verify the thumbnail was created successfully
-            if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
-                print(f"Successfully created R3D thumbnail with simpler command: {thumbnail_path}")
-                return thumbnail_path
-        except subprocess.TimeoutExpired:
-            print("Second thumbnail attempt timed out")
-        except Exception as e:
-            print(f"Second ffmpeg attempt failed: {e}")
+            print(f"Error using REDline: {e}")
         
-        # If we get to this point, thumbnail generation failed with both methods
+        # If REDline approach fails, fall back to ffmpeg
+        if not redline_success:
+            print("Falling back to ffmpeg for R3D thumbnail generation...")
+            
+            # Try different ffmpeg flags for R3D compatibility
+            print("Trying specialized ffmpeg flags for R3D files...")
+            try:
+                # First attempt: Use special flags for RED files
+                subprocess.run(
+                    [
+                        "ffmpeg", 
+                        "-y",  # Overwrite output files
+                        "-vsync", "0",  # Avoid frame rate sync issues
+                        "-probesize", "100M",  # Larger probe size for complex formats
+                        "-analyzeduration", "100M",  # Longer analyze duration
+                        "-i", r3d_path,  # Input file
+                        "-vframes", "1",  # Extract one frame
+                        "-q:v", "2",  # Quality (2 is high, 31 is low)
+                        "-vf", f"scale={width}:{height}:force_original_aspect_ratio=decrease,pad={width}:{height}:(ow-iw)/2:(oh-ih)/2",  # Scale and pad
+                        thumbnail_path  # Output file
+                    ],
+                    capture_output=True,
+                    check=True,
+                    timeout=60  # Add timeout to avoid hanging
+                )
+                
+                # Verify the thumbnail was created successfully
+                if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+                    print(f"Successfully created R3D thumbnail with ffmpeg: {thumbnail_path}")
+                    return thumbnail_path
+            except subprocess.TimeoutExpired:
+                print("Thumbnail generation timed out, trying simpler approach...")
+            except Exception as e:
+                print(f"First ffmpeg attempt failed: {e}")
+                
+            # Second attempt: Try with redcode1_codec option
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", 
+                        "-y",  # Overwrite output files
+                        "-redcode1_codec", "1",  # Try special redcode codec
+                        "-i", r3d_path,  # Input file
+                        "-vframes", "1",  # Extract one frame
+                        thumbnail_path  # Output file
+                    ],
+                    capture_output=True,
+                    check=True,
+                    timeout=60  # Add timeout to avoid hanging
+                )
+                
+                # Verify the thumbnail was created successfully
+                if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+                    print(f"Successfully created R3D thumbnail with redcode1_codec: {thumbnail_path}")
+                    return thumbnail_path
+            except subprocess.TimeoutExpired:
+                print("Second thumbnail attempt timed out")
+            except Exception as e:
+                print(f"Second ffmpeg attempt failed: {e}")
+            
+            # Third attempt: Use simpler ffmpeg command
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg", 
+                        "-y",  # Overwrite output files
+                        "-i", r3d_path,  # Input file
+                        "-vframes", "1",  # Extract one frame
+                        thumbnail_path  # Output file
+                    ],
+                    capture_output=True,
+                    check=True,
+                    timeout=60  # Add timeout to avoid hanging
+                )
+                
+                # Verify the thumbnail was created successfully
+                if os.path.exists(thumbnail_path) and os.path.getsize(thumbnail_path) > 0:
+                    print(f"Successfully created R3D thumbnail with simpler ffmpeg command: {thumbnail_path}")
+                    return thumbnail_path
+            except subprocess.TimeoutExpired:
+                print("Third thumbnail attempt timed out")
+            except Exception as e:
+                print(f"Third ffmpeg attempt failed: {e}")
+        
+        # If we get to this point, thumbnail generation failed with all methods
+        file_basename = os.path.basename(r3d_path)
         print(f"Could not generate thumbnail for {file_basename}, skipping")
         return None
         
@@ -654,7 +819,8 @@ def transcribe_audio(file_path, language="auto", model_size="base"):
             
             try:
                 # Extract audio using ffmpeg
-                subprocess.run([
+                print(f"Running ffmpeg to extract audio to {temp_audio_path}...")
+                ffmpeg_result = subprocess.run([
                     "ffmpeg",
                     "-y",  # Overwrite output files
                     "-i", file_path,  # Input file
@@ -663,48 +829,71 @@ def transcribe_audio(file_path, language="auto", model_size="base"):
                     "-ar", "16000",  # 16kHz sample rate (what Whisper expects)
                     "-ac", "1",  # Mono audio
                     temp_audio_path  # Output file
-                ], check=True, capture_output=True)
+                ], check=True, capture_output=True, text=True)
                 
                 # Use the extracted audio
                 transcription_file = temp_audio_path
+                print(f"Successfully extracted audio to temporary file: {temp_audio_path}")
+                print(f"Audio extraction ffmpeg output: {ffmpeg_result.stdout}")
+                
+                # Check the audio file size
+                audio_size = os.path.getsize(temp_audio_path)
+                print(f"Extracted audio file size: {audio_size/1024:.2f} KB")
+                
+                if audio_size < 1024:  # Less than 1KB might indicate a problem
+                    print("Warning: Extracted audio file is very small, may not contain valid audio")
             except Exception as e:
                 print(f"Error extracting audio: {e}")
+                if 'ffmpeg_result' in locals() and ffmpeg_result.stderr:
+                    print(f"FFmpeg error output: {ffmpeg_result.stderr}")
                 if os.path.exists(temp_audio_path):
                     os.unlink(temp_audio_path)
                 return None
         else:
             # Use the original file for audio files
             transcription_file = file_path
+            print(f"Using original audio file without extraction: {file_path}")
         
         # Check for matching separate WAV audio file (common with RED footage)
         if file_path.lower().endswith('.r3d'):
             possible_wav = os.path.splitext(file_path)[0] + '.wav'
             if os.path.exists(possible_wav):
                 print(f"Found matching WAV file for R3D: {possible_wav}")
+                wav_size = os.path.getsize(possible_wav)
+                print(f"WAV file size: {wav_size/1024:.2f} KB")
                 transcription_file = possible_wav
                 # Delete temporary extracted audio file if we're using the WAV instead
                 if 'temp_audio_path' in locals() and os.path.exists(temp_audio_path):
                     os.unlink(temp_audio_path)
+                    print(f"Deleted temporary audio file as we're using the matching WAV file")
         
         # Transcribe the audio
-        print(f"Transcribing audio with Whisper ({model_size} model)...")
+        print(f"Starting transcription of audio with Whisper ({model_size} model)...")
+        print(f"Transcription file: {transcription_file}")
         options = {"language": language} if language != "auto" else {}
         
         try:
+            print("Initiating Whisper transcription process...")
             result = model.transcribe(transcription_file, **options)
+            print("Whisper transcription completed successfully")
         except RuntimeError as e:
             if "CUDA" in str(e):
                 print("CUDA error detected. Falling back to CPU...")
                 # Try again with CPU device
+                print("Restarting transcription with CPU device...")
                 result = model.transcribe(transcription_file, device="cpu", **options)
+                print("CPU transcription completed successfully")
             else:
+                print(f"RuntimeError during transcription: {e}")
                 raise
         
         # Clean up temporary file if it exists
         if 'temp_audio_path' in locals() and os.path.exists(temp_audio_path):
             os.unlink(temp_audio_path)
+            print(f"Deleted temporary audio file after transcription")
         
         # Prepare result
+        print("Processing transcription results...")
         transcription_data = {
             "text": result["text"],
             "segments": result["segments"],
@@ -712,6 +901,12 @@ def transcribe_audio(file_path, language="auto", model_size="base"):
             "model": model_size,
             "processing_date": datetime.datetime.now().isoformat()
         }
+        
+        # Show a snippet of the transcription
+        text_preview = result["text"][:150] + "..." if len(result["text"]) > 150 else result["text"]
+        print(f"Transcription preview: {text_preview}")
+        print(f"Detected language: {result.get('language', 'unknown')}")
+        print(f"Number of segments: {len(result['segments'])}")
         
         return transcription_data
         
@@ -731,9 +926,16 @@ def transcribe_audio(file_path, language="auto", model_size="base"):
         
         os.makedirs(output_dir, exist_ok=True)
         
-        # Generate unique thumbnail filename
-        file_basename = os.path.basename(r3d_path)
-        thumbnail_name = f"{os.path.splitext(file_basename)[0]}_{uuid.uuid4().hex[:8]}.jpg"
+        # Generate thumbnail filename - use RDC key if provided
+        if rdc_key:
+            # Use RDC folder key to identify the clip rather than individual R3D file
+            thumbnail_name = f"{rdc_key}_{uuid.uuid4().hex[:8]}.jpg"
+            print(f"Using RDC-based thumbnail name: {thumbnail_name}")
+        else:
+            # Use individual file name
+            file_basename = os.path.basename(r3d_path)
+            thumbnail_name = f"{os.path.splitext(file_basename)[0]}_{uuid.uuid4().hex[:8]}.jpg"
+            
         thumbnail_path = os.path.join(output_dir, thumbnail_name)
         
         # Path to the R3D SDK sample executable
@@ -936,13 +1138,31 @@ def catalog_files(drive_info, conn=None):
                 else:
                     file_types[extension] = {"count": 1, "size": file_size}
                 
-                # Check specifically for .r3d files
+                # Check specifically for .r3d files and track RDC folders
                 is_r3d = extension.lower() == 'r3d'
                 if is_r3d:
                     r3d_count += 1
-                    # Print a message every 10 r3d files
-                    if r3d_count % 10 == 0:
-                        print(f"\nProcessed {r3d_count} R3D files so far. Current: {rel_path}")
+                    
+                    # Check if this is in an RDC folder structure
+                    file_dir = os.path.dirname(file_path)
+                    if os.path.basename(file_dir).upper() == "RDC" or "RDC" in file_dir:
+                        # This is in an RDC folder - process all chunks as one logical clip
+                        # Extract the parent+RDC folder as the logical clip identifier
+                        parent_dir = os.path.dirname(file_dir)
+                        rdc_name = os.path.basename(file_dir)
+                        parent_name = os.path.basename(parent_dir)
+                        rdc_key = f"{parent_name}_{rdc_name}"
+                        
+                        # Record the first file of each RDC folder we encounter
+                        if r3d_count % 10 == 0 or "001.R3D" in file_path.upper():
+                            print(f"\nProcessed {r3d_count} R3D files so far.")
+                            print(f"RDC folder: {file_dir}")
+                            print(f"First file in clip: {rel_path}")
+                    else:
+                        # Not in an RDC structure, just a regular R3D file
+                        # Print a message every 10 r3d files
+                        if r3d_count % 10 == 0:
+                            print(f"\nProcessed {r3d_count} R3D files so far. Current: {rel_path}")
                 
                 # Determine MIME type with special handling for R3D files
                 if is_r3d:
@@ -1403,14 +1623,14 @@ def process_transcriptions(drive_id=None, max_workers=2, model_size="base"):
     # Find all pending transcriptions
     if drive_id:
         cursor.execute("""
-        SELECT id, drive_id, path, filename, extension, mime_type
+        SELECT id, drive_id, path, filename, extension, mime_type, size_bytes
         FROM files
         WHERE transcription_status = 'pending' AND drive_id = ?
         ORDER BY size_bytes ASC
         """, (drive_id,))
     else:
         cursor.execute("""
-        SELECT id, drive_id, path, filename, extension, mime_type
+        SELECT id, drive_id, path, filename, extension, mime_type, size_bytes
         FROM files
         WHERE transcription_status = 'pending'
         ORDER BY size_bytes ASC
@@ -1425,8 +1645,25 @@ def process_transcriptions(drive_id=None, max_workers=2, model_size="base"):
     
     print(f"Found {len(pending_files)} files needing transcription")
     
+    # Get drive details for better reporting
+    drive_names = {}
+    cursor.execute("SELECT id, label, volume_name FROM drives")
+    for row in cursor.fetchall():
+        drive_names[row['id']] = row['label'] or row['volume_name']
+    
+    # Create a lock for progress updates to avoid interleaved output
+    progress_lock = threading.Lock()
+    total_files = len(pending_files)
+    completed_files = 0
+    success_files = 0
+    error_files = 0
+    in_progress = {}  # Track files currently in progress
+    start_time = datetime.datetime.now()
+    
     # Function to process a single file
-    def process_file(file_data):
+    def process_file(file_data, file_idx):
+        nonlocal completed_files, success_files, error_files
+        
         # Get drive mount point for the file
         c = sqlite3.connect(DB_PATH, timeout=60.0)
         c.row_factory = sqlite3.Row
@@ -1436,15 +1673,36 @@ def process_transcriptions(drive_id=None, max_workers=2, model_size="base"):
         drive_row = file_cursor.fetchone()
         
         if not drive_row:
-            print(f"Error: Drive not found for file {file_data['filename']}")
+            with progress_lock:
+                print(f"Error: Drive not found for file {file_data['filename']}")
+                completed_files += 1
+                error_files += 1
+                print_progress()
             return False
         
         # Construct full path
         mount_point = drive_row['mount_point']
         full_path = os.path.join(mount_point, file_data['path'])
+        drive_name = drive_names.get(file_data['drive_id'], "Unknown Drive")
+        
+        # Update in_progress tracking
+        with progress_lock:
+            in_progress[file_idx] = {
+                'filename': file_data['filename'], 
+                'drive': drive_name,
+                'status': 'Starting',
+                'size_mb': file_data['size_bytes'] / (1024*1024)
+            }
+            print_progress()
         
         if not os.path.exists(full_path):
-            print(f"Error: File not found: {full_path}")
+            with progress_lock:
+                print(f"Error: File not found: {full_path}")
+                in_progress.pop(file_idx, None)
+                completed_files += 1
+                error_files += 1
+                print_progress()
+                
             # Update status to error
             file_cursor.execute("""
             UPDATE files
@@ -1466,8 +1724,13 @@ def process_transcriptions(drive_id=None, max_workers=2, model_size="base"):
             """, (datetime.datetime.now().isoformat(), file_data['id']))
             c.commit()
             
+            # Update status in progress tracker
+            with progress_lock:
+                in_progress[file_idx]['status'] = 'Extracting audio'
+                print_progress()
+            
             # Transcribe the file
-            print(f"\nTranscribing: {file_data['filename']}")
+            # We'll use the verbose output from the transcribe_audio function for progress details
             result = transcribe_audio(full_path, model_size=model_size)
             
             if result:
@@ -1480,7 +1743,13 @@ def process_transcriptions(drive_id=None, max_workers=2, model_size="base"):
                 WHERE id = ?
                 """, (json.dumps(result), datetime.datetime.now().isoformat(), file_data['id']))
                 c.commit()
-                print(f"✓ Transcription completed: {file_data['filename']}")
+                
+                with progress_lock:
+                    print(f"✓ Transcription completed: {file_data['filename']}")
+                    in_progress.pop(file_idx, None)
+                    completed_files += 1
+                    success_files += 1
+                    print_progress()
                 return True
             else:
                 # Update status to error
@@ -1491,11 +1760,23 @@ def process_transcriptions(drive_id=None, max_workers=2, model_size="base"):
                 WHERE id = ?
                 """, (datetime.datetime.now().isoformat(), file_data['id']))
                 c.commit()
-                print(f"✗ Transcription failed: {file_data['filename']}")
+                
+                with progress_lock:
+                    print(f"✗ Transcription failed: {file_data['filename']}")
+                    in_progress.pop(file_idx, None)
+                    completed_files += 1
+                    error_files += 1
+                    print_progress()
                 return False
                 
         except Exception as e:
-            print(f"Error processing {file_data['filename']}: {e}")
+            with progress_lock:
+                print(f"Error processing {file_data['filename']}: {e}")
+                in_progress.pop(file_idx, None)
+                completed_files += 1
+                error_files += 1
+                print_progress()
+                
             # Update status to error
             file_cursor.execute("""
             UPDATE files
@@ -1508,29 +1789,63 @@ def process_transcriptions(drive_id=None, max_workers=2, model_size="base"):
         finally:
             c.close()
     
+    # Helper function to print progress information
+    def print_progress():
+        # Calculate progress percentage and elapsed time
+        if total_files > 0:
+            progress_pct = (completed_files / total_files) * 100
+        else:
+            progress_pct = 0
+        
+        elapsed = (datetime.datetime.now() - start_time).total_seconds()
+        files_per_sec = completed_files / elapsed if elapsed > 0 else 0
+        
+        # Estimate remaining time
+        if files_per_sec > 0 and completed_files < total_files:
+            remaining_files = total_files - completed_files
+            remaining_secs = remaining_files / files_per_sec
+            remaining_mins = int(remaining_secs // 60)
+            remaining_secs = int(remaining_secs % 60)
+            eta = f"ETA: {remaining_mins}m {remaining_secs}s"
+        else:
+            eta = "ETA: calculating..."
+        
+        # Print summary
+        print("\n----- TRANSCRIPTION PROGRESS -----")
+        print(f"Progress: {completed_files}/{total_files} files ({progress_pct:.1f}%)")
+        print(f"Status: {success_files} successful, {error_files} failed, {len(in_progress)} in progress")
+        print(f"Rate: {files_per_sec:.2f} files/minute | {eta}")
+        
+        # Print currently processing files
+        if in_progress:
+            print("\nCurrently processing:")
+            for idx, info in in_progress.items():
+                print(f"  {info['filename']} ({info['size_mb']:.1f} MB) - {info['status']} - Drive: {info['drive']}")
+        
+        print("----------------------------------\n")
+    
     # Process files in parallel
     print(f"Starting transcription with {max_workers} parallel workers")
-    processed_count = 0
-    error_count = 0
     
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = []
-        for file_data in pending_files:
-            futures.append(executor.submit(process_file, dict(file_data)))
+        for i, file_data in enumerate(pending_files):
+            futures.append(executor.submit(process_file, dict(file_data), i))
         
+        # Wait for all futures to complete
         for future in futures:
-            if future.result():
-                processed_count += 1
-            else:
-                error_count += 1
+            future.result()
     
     print("\n=== TRANSCRIPTION SUMMARY ===")
-    print(f"Total files processed: {processed_count + error_count}")
-    print(f"Successful transcriptions: {processed_count}")
-    print(f"Failed transcriptions: {error_count}")
+    print(f"Total files processed: {completed_files}")
+    print(f"Successful transcriptions: {success_files}")
+    print(f"Failed transcriptions: {error_files}")
+    
+    elapsed_time = (datetime.datetime.now() - start_time).total_seconds()
+    print(f"Total elapsed time: {int(elapsed_time // 60)} minutes, {int(elapsed_time % 60)} seconds")
     
     conn.close()
-    return processed_count
+    return success_files
 
 def clean_duplicate_drives():
     """Interactive tool to clean up duplicate drive entries"""
