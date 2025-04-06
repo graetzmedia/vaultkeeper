@@ -369,7 +369,7 @@ document.addEventListener('DOMContentLoaded', function() {
             // Add listener for client assignment
             clientSelect.addEventListener('change', async (e) => {
                 const clientName = e.target.value;
-                if (!clientName) return;
+                if (!clientName || clientName === 'ADD_NEW_CLIENT') return;
                 
                 try {
                     if (USE_BACKEND) {
@@ -521,52 +521,108 @@ document.addEventListener('DOMContentLoaded', function() {
             selectElement.appendChild(addNewOption);
             
             // Add change listener to handle "Add new client..." selection
-            selectElement.addEventListener('change', async (e) => {
-                if (e.target.value === 'ADD_NEW_CLIENT') {
-                    const newClientName = prompt('Enter new client name:');
-                    if (newClientName && newClientName.trim()) {
-                        try {
-                            // Create the new client
-                            const response = await fetch(`${API_BASE_URL}/api/clients`, {
-                                method: 'POST',
-                                headers: {
-                                    'Content-Type': 'application/json',
-                                },
-                                body: JSON.stringify({ name: newClientName.trim() }),
-                            });
-                            
-                            if (!response.ok) throw new Error('Failed to add client');
-                            
-                            const newClient = await response.json();
-                            console.log('New client created:', newClient);
-                            
-                            // Add the new client to the select
-                            const option = document.createElement('option');
-                            option.value = newClient.name;
-                            option.textContent = newClient.name;
-                            
-                            // Insert before the separator
-                            selectElement.insertBefore(option, separator);
-                            
-                            // Select the new client
-                            option.selected = true;
-                            
-                            // Trigger change event to apply the selection
-                            const event = new Event('change');
-                            selectElement.dispatchEvent(event);
-                        } catch (error) {
-                            console.error('Error adding client:', error);
-                            alert('Failed to add client: ' + error.message);
-                            
+            // Store original listener to prevent duplicates
+            if (!selectElement.hasAddNewClientHandler) {
+                selectElement.hasAddNewClientHandler = true;
+                
+                selectElement.addEventListener('change', async (e) => {
+                    if (e.target.value === 'ADD_NEW_CLIENT') {
+                        const newClientName = prompt('Enter new client name:');
+                        if (newClientName && newClientName.trim()) {
+                            try {
+                                // Create the new client
+                                const response = await fetch(`${API_BASE_URL}/api/clients`, {
+                                    method: 'POST',
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                    },
+                                    body: JSON.stringify({ name: newClientName.trim() }),
+                                });
+                                
+                                if (!response.ok) throw new Error('Failed to add client');
+                                
+                                const newClient = await response.json();
+                                console.log('New client created:', newClient);
+                                
+                                // Add the new client to the select
+                                const option = document.createElement('option');
+                                option.value = newClient.name;
+                                option.textContent = newClient.name;
+                                
+                                // Insert before the separator
+                                selectElement.insertBefore(option, separator);
+                                
+                                // Select the new client
+                                option.selected = true;
+                                
+                                // Manually trigger the change handler for the select instead of dispatching event
+                                // This prevents recursion and ADD_NEW_CLIENT being saved
+                                
+                                // Find the parent element that holds the client dropdown
+                                const parentCell = selectElement.closest('td');
+                                if (parentCell) {
+                                    // If we're in a table cell (drive or folder assignment)
+                                    const clientSpan = parentCell.querySelector('span');
+                                    if (clientSpan) {
+                                        clientSpan.textContent = newClient.name;
+                                    } else {
+                                        const newSpan = document.createElement('span');
+                                        newSpan.textContent = newClient.name;
+                                        newSpan.style.marginRight = '10px';
+                                        parentCell.insertBefore(newSpan, parentCell.firstChild);
+                                    }
+                                }
+                                
+                                // For drive assignment
+                                if (selectElement.dataset.driveId) {
+                                    // Handle drive client assignment
+                                    if (USE_BACKEND) {
+                                        const driveResponse = await fetch(`${API_BASE_URL}/api/drives/${selectElement.dataset.driveId}/assign-client`, {
+                                            method: 'POST',
+                                            headers: {
+                                                'Content-Type': 'application/json',
+                                            },
+                                            body: JSON.stringify({ client: newClient.name }),
+                                        });
+                                        
+                                        if (!driveResponse.ok) console.error('Failed to assign client to drive');
+                                    }
+                                }
+                                
+                                // For folder assignment
+                                if (selectElement.dataset.folderPath) {
+                                    // Handle folder client assignment
+                                    if (USE_BACKEND) {
+                                        const folderResponse = await fetch(`${API_BASE_URL}/api/folders/assign-client`, {
+                                            method: 'POST',
+                                            headers: {
+                                                'Content-Type': 'application/json',
+                                            },
+                                            body: JSON.stringify({
+                                                drive_id: selectElement.dataset.driveId,
+                                                folder_path: selectElement.dataset.folderPath,
+                                                client: newClient.name
+                                            }),
+                                        });
+                                        
+                                        if (!folderResponse.ok) console.error('Failed to assign client to folder');
+                                    }
+                                }
+                                
+                            } catch (error) {
+                                console.error('Error adding client:', error);
+                                alert('Failed to add client: ' + error.message);
+                                
+                                // Reset selection to the first option
+                                selectElement.selectedIndex = 0;
+                            }
+                        } else {
                             // Reset selection to the first option
                             selectElement.selectedIndex = 0;
                         }
-                    } else {
-                        // Reset selection to the first option
-                        selectElement.selectedIndex = 0;
                     }
-                }
-            });
+                });
+            }
         } catch (error) {
             console.error('Error loading clients for select:', error);
         }
@@ -660,7 +716,7 @@ document.addEventListener('DOMContentLoaded', function() {
             // Add listener for client assignment
             clientSelect.addEventListener('change', async (e) => {
                 const clientName = e.target.value;
-                if (!clientName) return;
+                if (!clientName || clientName === 'ADD_NEW_CLIENT') return;
                 
                 try {
                     if (USE_BACKEND) {
