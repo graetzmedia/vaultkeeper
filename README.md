@@ -15,7 +15,7 @@ VaultKeeper is a comprehensive system for cataloging, organizing, and tracking m
 - **Interactive CLI Menu**: User-friendly text-based menu interface
 - **Web-based GUI**: Search, browse thumbnails, and manage media assets through a web interface
 - **Transcription Search**: Find files by spoken content in audio tracks
-- **Client Management**: Assign files to clients and organize assets by project
+- **Client Management**: Assign drives, folders, or individual files to clients
 - **Flexible Storage Organization**: Place drives anywhere with QR-based tracking and location IDs
 - **NIIMBOT D101/B1 Support**: Direct or manual printing to NIIMBOT thermal label printers
 - **Location/Shelf QR Codes**: Generate location labels with matching QR codes
@@ -83,6 +83,7 @@ pip install openai-whisper qrcode pillow flask flask-cors
 # Run the Flask server from the project root
 python web/server.py
 # Then open http://localhost:5000 in your browser
+# See README-GUI.md for detailed web interface documentation
 ```
 
 ## Using the Menu Interface

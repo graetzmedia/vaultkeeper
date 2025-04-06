@@ -1,0 +1,765 @@
+#!/usr/bin/env python3
+
+from flask import Flask, request, jsonify, send_from_directory
+from flask_cors import CORS
+import os
+import sqlite3
+import json
+import uuid
+from datetime import datetime
+import mimetypes
+
+# Initialize Flask app
+app = Flask(__name__)
+CORS(app)  # Allow cross-origin requests
+
+# Database configuration
+DB_PATH = os.path.expanduser("~/media-asset-tracker/asset-db.sqlite")
+THUMBNAILS_DIR = os.path.expanduser("~/media-asset-tracker/thumbnails")
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web')
+
+# Create a placeholder directory for missing thumbnails
+PLACEHOLDER_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web', 'placeholders')
+if not os.path.exists(PLACEHOLDER_DIR):
+    os.makedirs(PLACEHOLDER_DIR)
+
+# Helper function to connect to the database
+def get_db_connection():
+    conn = sqlite3.connect(DB_PATH, timeout=60.0)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+# Helper function to convert SQLite row to dictionary
+def dict_factory(cursor, row):
+    d = {}
+    for idx, col in enumerate(cursor.description):
+        d[col[0]] = row[idx]
+    return d
+
+# Serve static files from web directory
+@app.route('/')
+def serve_index():
+    return send_from_directory(STATIC_DIR, 'index.html')
+
+@app.route('/<path:path>')
+def serve_static(path):
+    return send_from_directory(STATIC_DIR, path)
+
+# Serve thumbnail images with improved path handling
+@app.route('/thumbnails/<path:path>')
+def serve_thumbnail(path):
+    # First, determine the file type to provide appropriate placeholder
+    file_extension = os.path.splitext(path)[1].lower() if '.' in path else ''
+    
+    # Set up file type for placeholder
+    if file_extension in ['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.gif', '.cr2', '.arw']:
+        file_type = 'image'
+    elif file_extension in ['.mp4', '.mov', '.avi', '.mxf', '.r3d']:
+        file_type = 'video'
+    elif file_extension in ['.wav', '.mp3', '.aac', '.flac']:
+        file_type = 'audio'
+    else:
+        file_type = 'document'
+    
+    # Attempt to handle both formats: drive_id/filename or just filename
+    if '/' in path:
+        # Path contains directory separator (drive_id/filename format)
+        parts = path.split('/')
+        if len(parts) == 2:
+            drive_id, filename = parts
+            thumbnail_path = os.path.join(THUMBNAILS_DIR, drive_id, filename)
+            if os.path.exists(thumbnail_path):
+                return send_from_directory(os.path.join(THUMBNAILS_DIR, drive_id), filename)
+    
+    # First try direct path
+    if os.path.exists(os.path.join(THUMBNAILS_DIR, path)):
+        return send_from_directory(THUMBNAILS_DIR, path)
+    
+    # Then try searching for the filename in subdirectories
+    for root, dirs, files in os.walk(THUMBNAILS_DIR):
+        if os.path.basename(path) in files:
+            rel_dir = os.path.relpath(root, THUMBNAILS_DIR)
+            if rel_dir == '.':
+                return send_from_directory(THUMBNAILS_DIR, os.path.basename(path))
+            else:
+                return send_from_directory(root, os.path.basename(path))
+    
+    # Check if a placeholder exists for this file type
+    placeholder_path = os.path.join(PLACEHOLDER_DIR, f"{file_type}.png")
+    if os.path.exists(placeholder_path):
+        return send_from_directory(PLACEHOLDER_DIR, f"{file_type}.png")
+    
+    # If no suitable placeholder, return a 404
+    return jsonify({'error': 'Thumbnail not found'}), 404
+
+# API routes
+@app.route('/api/drives', methods=['GET'])
+def get_drives():
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+    SELECT id, label, volume_name as volumeName, size_bytes as sizeBytes, 
+           free_bytes as freeBytes, format, mount_point as mountPoint, 
+           date_cataloged as dateCataloged, last_verified as lastVerified
+    FROM drives
+    ORDER BY date_cataloged DESC
+    """)
+    
+    drives = cursor.fetchall()
+    
+    # For each drive, determine if it has a project associating it with a client
+    for drive in drives:
+        # Look for projects that seem to be related to this drive
+        cursor.execute("""
+        SELECT DISTINCT p.client
+        FROM projects p
+        WHERE p.name LIKE ? OR p.notes LIKE ?
+        """, (f"Drive: {drive['label'] or drive['volumeName'] or drive['id']}%", 
+              f"%drive {drive['id']}%"))
+        
+        client_result = cursor.fetchone()
+        drive['client'] = client_result['client'] if client_result else None
+    
+    conn.close()
+    
+    return jsonify(drives)
+
+@app.route('/api/drives/<drive_id>/qr-code', methods=['GET'])
+def get_drive_qr_code(drive_id):
+    """Serve a QR code for a drive"""
+    qr_code_path = os.path.join(os.path.expanduser('~/media-asset-tracker/qr-codes'), f"{drive_id}.png")
+    
+    # If the QR code exists, serve it
+    if os.path.exists(qr_code_path):
+        return send_from_directory(os.path.dirname(qr_code_path), os.path.basename(qr_code_path))
+    
+    # Otherwise, try to generate it (if we have qrcode library)
+    try:
+        import qrcode
+        from PIL import Image
+        
+        # Get drive info
+        conn = get_db_connection()
+        conn.row_factory = dict_factory
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, label, volume_name FROM drives WHERE id = ?", (drive_id,))
+        drive = cursor.fetchone()
+        conn.close()
+        
+        if not drive:
+            return jsonify({'error': 'Drive not found'}), 404
+        
+        # Create QR code directory if it doesn't exist
+        qr_dir = os.path.dirname(qr_code_path)
+        if not os.path.exists(qr_dir):
+            os.makedirs(qr_dir)
+        
+        # Generate QR code with drive info
+        drive_info = {
+            'id': drive['id'],
+            'label': drive['label'],
+            'volume_name': drive['volume_name']
+        }
+        
+        qr = qrcode.QRCode(
+            version=1,
+            error_correction=qrcode.constants.ERROR_CORRECT_L,
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(json.dumps(drive_info))
+        qr.make(fit=True)
+        
+        img = qr.make_image(fill_color="black", back_color="white")
+        img.save(qr_code_path)
+        
+        return send_from_directory(os.path.dirname(qr_code_path), os.path.basename(qr_code_path))
+        
+    except ImportError:
+        # If qrcode is not installed, return a placeholder
+        return jsonify({'error': 'QR code generation not available. Install the qrcode library: pip install qrcode[pil]'}), 501
+    except Exception as e:
+        return jsonify({'error': f'Failed to generate QR code: {str(e)}'}), 500
+
+@app.route('/api/drives/<drive_id>/folders', methods=['GET'])
+def get_drive_folders(drive_id):
+    """Get top-level folders for a drive"""
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Verify drive exists
+    cursor.execute("SELECT id FROM drives WHERE id = ?", (drive_id,))
+    drive = cursor.fetchone()
+    
+    if not drive:
+        conn.close()
+        return jsonify({'error': 'Drive not found'}), 404
+    
+    # Get unique top-level folders from this drive
+    # We'll extract the first segment of each file path
+    cursor.execute("""
+    SELECT 
+        DISTINCT SUBSTR(path, 1, INSTR(path || '/', '/') - 1) as folder_path,
+        COUNT(*) as item_count
+    FROM files
+    WHERE drive_id = ? AND path IS NOT NULL AND path != ''
+    GROUP BY folder_path
+    ORDER BY folder_path
+    """, (drive_id,))
+    
+    folders = cursor.fetchall()
+    
+    # Get client assignments for each folder (if any)
+    for folder in folders:
+        cursor.execute("""
+        SELECT DISTINCT p.client
+        FROM projects p
+        JOIN project_files pf ON p.id = pf.project_id
+        JOIN files f ON pf.file_id = f.id
+        WHERE f.drive_id = ? AND f.path LIKE ?
+        """, (drive_id, folder['folder_path'] + '/%'))
+        
+        client_result = cursor.fetchone()
+        folder['client'] = client_result['client'] if client_result else None
+    
+    conn.close()
+    
+    return jsonify(folders)
+
+@app.route('/api/drives/<drive_id>/assign-client', methods=['POST'])
+def assign_drive_to_client(drive_id):
+    """Assign a drive to a client by creating a project for the drive"""
+    data = request.json
+    client_name = data.get('client', '').strip()
+    
+    if not client_name:
+        return jsonify({'error': 'Client name is required'}), 400
+    
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Verify drive exists
+    cursor.execute("SELECT id, label, volume_name FROM drives WHERE id = ?", (drive_id,))
+    drive = cursor.fetchone()
+    
+    if not drive:
+        conn.close()
+        return jsonify({'error': 'Drive not found'}), 404
+    
+    # Create a project for this drive
+    drive_name = drive['label'] or drive['volume_name'] or drive['id']
+    project_id = str(uuid.uuid4())
+    project_name = f"Drive: {drive_name}"
+    
+    cursor.execute("""
+    INSERT INTO projects (id, name, client, date_created, notes)
+    VALUES (?, ?, ?, ?, ?)
+    """, (project_id, project_name, client_name, datetime.now().isoformat(), f"Drive assignment for {drive_name}"))
+    
+    # Get all files from this drive
+    cursor.execute("SELECT id FROM files WHERE drive_id = ?", (drive_id,))
+    files = cursor.fetchall()
+    
+    # Assign all files to the project
+    for file in files:
+        cursor.execute("""
+        INSERT OR IGNORE INTO project_files (project_id, file_id)
+        VALUES (?, ?)
+        """, (project_id, file['id']))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'status': 'success',
+        'drive_id': drive_id,
+        'client': client_name,
+        'project_id': project_id
+    })
+
+@app.route('/api/folders/assign-client', methods=['POST'])
+def assign_folder_to_client():
+    """Assign a folder to a client by creating a project for the folder contents"""
+    data = request.json
+    drive_id = data.get('drive_id', '').strip()
+    folder_path = data.get('folder_path', '').strip()
+    client_name = data.get('client', '').strip()
+    
+    if not client_name:
+        return jsonify({'error': 'Client name is required'}), 400
+    
+    if not drive_id:
+        return jsonify({'error': 'Drive ID is required'}), 400
+    
+    if not folder_path:
+        return jsonify({'error': 'Folder path is required'}), 400
+    
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Verify drive exists
+    cursor.execute("SELECT id, label, volume_name FROM drives WHERE id = ?", (drive_id,))
+    drive = cursor.fetchone()
+    
+    if not drive:
+        conn.close()
+        return jsonify({'error': 'Drive not found'}), 404
+    
+    # Create a project for this folder
+    drive_name = drive['label'] or drive['volume_name'] or drive['id']
+    project_id = str(uuid.uuid4())
+    project_name = f"Folder: {folder_path} ({drive_name})"
+    
+    cursor.execute("""
+    INSERT INTO projects (id, name, client, date_created, notes)
+    VALUES (?, ?, ?, ?, ?)
+    """, (project_id, project_name, client_name, datetime.now().isoformat(), 
+          f"Folder assignment for {folder_path} on drive {drive_name}"))
+    
+    # Get all files from this folder
+    cursor.execute("""
+    SELECT id FROM files 
+    WHERE drive_id = ? AND path LIKE ?
+    """, (drive_id, folder_path + '/%'))
+    
+    files = cursor.fetchall()
+    
+    # Assign all files to the project
+    for file in files:
+        cursor.execute("""
+        INSERT OR IGNORE INTO project_files (project_id, file_id)
+        VALUES (?, ?)
+        """, (project_id, file['id']))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'status': 'success',
+        'drive_id': drive_id,
+        'folder_path': folder_path,
+        'client': client_name,
+        'project_id': project_id
+    })
+
+@app.route('/api/clients', methods=['GET'])
+def get_clients():
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Get all unique clients from projects table by client name
+    # Note: Using DISTINCT ON client, not id to avoid duplicates
+    cursor.execute("""
+    SELECT DISTINCT client as name
+    FROM projects
+    WHERE client IS NOT NULL AND client != ''
+    ORDER BY client
+    """)
+    
+    clients = cursor.fetchall()
+    
+    # Convert to list of objects with id and name
+    result = []
+    for i, client in enumerate(clients):
+        result.append({
+            'id': f"client-{i+1}",
+            'name': client['name']
+        })
+    
+    conn.close()
+    
+    return jsonify(result)
+
+@app.route('/api/clients', methods=['POST'])
+def add_client():
+    data = request.json
+    client_name = data.get('name')
+    
+    if not client_name:
+        return jsonify({'error': 'Client name is required'}), 400
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Create a new project with the client name
+    # In a real system, you might have a dedicated clients table
+    project_id = str(uuid.uuid4())
+    cursor.execute("""
+    INSERT INTO projects (id, name, client, date_created, notes)
+    VALUES (?, ?, ?, ?, ?)
+    """, (project_id, f"Client: {client_name}", client_name, datetime.now().isoformat(), "Created via GUI"))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'id': project_id,
+        'name': client_name
+    })
+
+@app.route('/api/clients/<client_id>/assign-files', methods=['POST'])
+def assign_files_to_client(client_id):
+    data = request.json
+    file_ids = data.get('fileIds', [])
+    
+    if not file_ids:
+        return jsonify({'error': 'No files provided'}), 400
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Find project ID associated with this client ID
+    cursor.execute("SELECT id FROM projects WHERE id = ?", (client_id,))
+    project = cursor.fetchone()
+    
+    if not project:
+        return jsonify({'error': 'Client/project not found'}), 404
+    
+    # Assign files to the project
+    for file_id in file_ids:
+        try:
+            cursor.execute("""
+            INSERT OR IGNORE INTO project_files (project_id, file_id)
+            VALUES (?, ?)
+            """, (client_id, file_id))
+        except sqlite3.Error as e:
+            return jsonify({'error': f'Database error: {str(e)}'}), 500
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'success': True, 'files_assigned': len(file_ids)})
+
+@app.route('/api/search', methods=['GET'])
+def search():
+    query = request.args.get('query', '')
+    search_type = request.args.get('type', 'any')
+    include_transcripts = request.args.get('transcripts', 'false').lower() == 'true'
+    drive_id = request.args.get('drive', '')
+    client_id = request.args.get('client', '')
+    page = int(request.args.get('page', 1))
+    page_size = int(request.args.get('pageSize', 20))
+    
+    offset = (page - 1) * page_size
+    
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Build WHERE clauses based on search parameters
+    where_clauses = []
+    params = []
+    
+    # Add drive filter if specified
+    if drive_id:
+        where_clauses.append("f.drive_id = ?")
+        params.append(drive_id)
+    
+    # Add client/project filter if specified
+    if client_id:
+        where_clauses.append("EXISTS (SELECT 1 FROM project_files pf JOIN projects p ON pf.project_id = p.id WHERE pf.file_id = f.id AND p.id = ?)")
+        params.append(client_id)
+    
+    # Add search criteria based on type
+    if query:
+        if search_type == 'filename':
+            where_clauses.append("f.filename LIKE ?")
+            params.append(f"%{query}%")
+        elif search_type == 'extension':
+            where_clauses.append("f.extension = ?")
+            params.append(query.lstrip('.').lower())
+        elif search_type == 'project':
+            where_clauses.append("EXISTS (SELECT 1 FROM project_files pf JOIN projects p ON pf.project_id = p.id WHERE pf.file_id = f.id AND (p.name LIKE ? OR p.client LIKE ?))")
+            params.extend([f"%{query}%", f"%{query}%"])
+        else:  # 'any' - general search
+            if include_transcripts:
+                where_clauses.append("(f.filename LIKE ? OR f.path LIKE ? OR d.label LIKE ? OR d.volume_name LIKE ? OR (f.transcription_status = 'completed' AND f.transcription LIKE ?))")
+                params.extend([f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"])
+            else:
+                where_clauses.append("(f.filename LIKE ? OR f.path LIKE ? OR d.label LIKE ? OR d.volume_name LIKE ?)")
+                params.extend([f"%{query}%", f"%{query}%", f"%{query}%", f"%{query}%"])
+    
+    # Combine WHERE clauses
+    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+    
+    # Get total count for pagination
+    cursor.execute(f"""
+    SELECT COUNT(*) as total
+    FROM files f
+    JOIN drives d ON f.drive_id = d.id
+    WHERE {where_sql}
+    """, params)
+    
+    total_results = cursor.fetchone()['total']
+    total_pages = (total_results + page_size - 1) // page_size
+    
+    # Execute search query with pagination
+    cursor.execute(f"""
+    SELECT f.id, f.drive_id as driveId, f.path, f.filename, f.extension,
+           f.size_bytes as sizeBytes, f.date_modified as dateModified,
+           f.mime_type as mimeType, f.thumbnail_path as thumbnailPath,
+           f.transcription, d.label as driveLabel, d.volume_name as volumeName
+    FROM files f
+    JOIN drives d ON f.drive_id = d.id
+    WHERE {where_sql}
+    ORDER BY f.date_modified DESC
+    LIMIT ? OFFSET ?
+    """, params + [page_size, offset])
+    
+    results = cursor.fetchall()
+    
+    # Process the results to make them JSON-friendly
+    for result in results:
+        # Process transcription JSON if it exists
+        if result['transcription']:
+            try:
+                result['transcription'] = json.loads(result['transcription'])
+            except json.JSONDecodeError:
+                result['transcription'] = None
+        
+        # Combine drive label and volume name
+        result['driveName'] = result['driveLabel'] or result['volumeName']
+        
+        # Remove redundant keys
+        result.pop('driveLabel', None)
+        result.pop('volumeName', None)
+    
+    conn.close()
+    
+    return jsonify({
+        'results': results,
+        'total': total_results,
+        'page': page,
+        'pageSize': page_size,
+        'totalPages': total_pages
+    })
+
+# Projects API endpoints
+@app.route('/api/projects', methods=['GET'])
+def get_projects():
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+    SELECT p.id, p.name, p.client, p.date_created as dateCreated, p.notes,
+           COUNT(pf.file_id) as fileCount
+    FROM projects p
+    LEFT JOIN project_files pf ON p.id = pf.project_id
+    GROUP BY p.id
+    ORDER BY p.date_created DESC
+    """)
+    
+    projects = cursor.fetchall()
+    conn.close()
+    
+    return jsonify(projects)
+
+@app.route('/api/projects', methods=['POST'])
+def create_project():
+    data = request.json
+    project_name = data.get('name', '').strip()
+    client_name = data.get('client', '').strip()
+    
+    if not project_name:
+        return jsonify({'error': 'Project name is required'}), 400
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Create a new project
+    project_id = str(uuid.uuid4())
+    notes = f"Created via GUI. Client: {client_name}" if client_name else "Created via GUI"
+    
+    cursor.execute("""
+    INSERT INTO projects (id, name, client, date_created, notes)
+    VALUES (?, ?, ?, ?, ?)
+    """, (project_id, project_name, client_name, datetime.now().isoformat(), notes))
+    
+    conn.commit()
+    conn.close()
+    
+    return jsonify({
+        'id': project_id,
+        'name': project_name,
+        'client': client_name,
+        'status': 'success'
+    })
+
+@app.route('/api/projects/<project_id>', methods=['GET'])
+def get_project(project_id):
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+    SELECT p.id, p.name, p.client, p.date_created as dateCreated, p.notes
+    FROM projects p
+    WHERE p.id = ?
+    """, (project_id,))
+    
+    project = cursor.fetchone()
+    
+    if not project:
+        conn.close()
+        return jsonify({'error': 'Project not found'}), 404
+    
+    # Get files for this project
+    cursor.execute("""
+    SELECT f.id, f.filename, f.path, f.drive_id as driveId, f.size_bytes as sizeBytes,
+           f.date_modified as dateModified, f.thumbnail_path as thumbnailPath,
+           d.label as driveLabel, d.volume_name as volumeName
+    FROM files f
+    JOIN project_files pf ON f.id = pf.file_id
+    JOIN drives d ON f.drive_id = d.id
+    WHERE pf.project_id = ?
+    ORDER BY f.date_modified DESC
+    """, (project_id,))
+    
+    files = cursor.fetchall()
+    
+    # Add combined drive name
+    for file in files:
+        file['driveName'] = file.get('driveLabel') or file.get('volumeName')
+        file.pop('driveLabel', None)
+        file.pop('volumeName', None)
+    
+    project['files'] = files
+    conn.close()
+    
+    return jsonify(project)
+
+@app.route('/api/projects/<project_id>/export', methods=['GET'])
+def export_project(project_id):
+    """Generate a CSV export of a project's files"""
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Verify project exists
+    cursor.execute("SELECT name FROM projects WHERE id = ?", (project_id,))
+    project = cursor.fetchone()
+    
+    if not project:
+        conn.close()
+        return jsonify({'error': 'Project not found'}), 404
+    
+    # Get files for this project
+    cursor.execute("""
+    SELECT f.id, f.filename, f.path, f.drive_id, f.size_bytes,
+           f.date_modified, f.mime_type, f.extension,
+           d.label as drive_label, d.volume_name as drive_volume
+    FROM files f
+    JOIN project_files pf ON f.id = pf.file_id
+    JOIN drives d ON f.drive_id = d.id
+    WHERE pf.project_id = ?
+    ORDER BY f.date_modified DESC
+    """, (project_id,))
+    
+    files = cursor.fetchall()
+    conn.close()
+    
+    # Generate CSV content
+    import csv
+    from io import StringIO
+    
+    csv_data = StringIO()
+    csv_writer = csv.writer(csv_data)
+    
+    # Write header
+    csv_writer.writerow(['ID', 'Filename', 'Path', 'Drive ID', 'Drive Name', 'Size (bytes)', 'Size (human)', 'Date Modified', 'MIME Type', 'Extension'])
+    
+    # Write data rows
+    for file in files:
+        size_human = format_file_size(file['size_bytes'])
+        drive_name = file['drive_label'] or file['drive_volume'] or 'Unknown Drive'
+        
+        csv_writer.writerow([
+            file['id'],
+            file['filename'],
+            file['path'],
+            file['drive_id'],
+            drive_name,
+            file['size_bytes'],
+            size_human,
+            file['date_modified'],
+            file['mime_type'],
+            file['extension']
+        ])
+    
+    # Create response with CSV attachment
+    from flask import Response
+    
+    response = Response(
+        csv_data.getvalue(),
+        mimetype='text/csv',
+        headers={
+            'Content-Disposition': f'attachment; filename=project_{project_id}.csv'
+        }
+    )
+    
+    return response
+
+# Helper function to format file size
+def format_file_size(bytes_size):
+    if bytes_size < 1024:
+        return f"{bytes_size} B"
+    elif bytes_size < 1024 * 1024:
+        return f"{bytes_size / 1024:.1f} KB"
+    elif bytes_size < 1024 * 1024 * 1024:
+        return f"{bytes_size / (1024 * 1024):.1f} MB"
+    else:
+        return f"{bytes_size / (1024 * 1024 * 1024):.2f} GB"
+
+# Reports and Analytics API
+@app.route('/api/reports/storage', methods=['GET'])
+def get_storage_report():
+    """Get storage usage by drive"""
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+    SELECT d.id, d.label, d.volume_name as volumeName, 
+           d.size_bytes as sizeBytes, d.free_bytes as freeBytes,
+           COUNT(f.id) as fileCount,
+           SUM(f.size_bytes) as usedBytes
+    FROM drives d
+    LEFT JOIN files f ON d.id = f.drive_id
+    GROUP BY d.id
+    ORDER BY usedBytes DESC
+    """)
+    
+    drives = cursor.fetchall()
+    conn.close()
+    
+    return jsonify({'drives': drives})
+
+@app.route('/api/reports/filetypes', methods=['GET'])
+def get_filetypes_report():
+    """Get file types distribution"""
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    cursor.execute("""
+    SELECT extension, COUNT(*) as count, SUM(size_bytes) as totalBytes
+    FROM files
+    GROUP BY extension
+    ORDER BY count DESC
+    """)
+    
+    file_types = cursor.fetchall()
+    conn.close()
+    
+    return jsonify({'fileTypes': file_types})
+
+# Start the server
+if __name__ == '__main__':
+    app.run(debug=True, port=5000)

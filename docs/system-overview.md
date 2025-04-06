@@ -70,6 +70,8 @@ VaultKeeper is built on a flexible architecture:
 - **Web GUI**: Browser-based responsive interface for searching and managing assets
 - **Thumbnail Browser**: Visual tools for browsing media assets and previews
 - **Responsive Design**: Works on desktop and mobile devices through the web interface
+- **Client Management**: Assign drives, folders, and files to specific clients
+- **Project Organization**: Group files by project with customizable metadata
 
 ### Hardware Integration
 - **NIIMBOT Printer**: Bluetooth label printer for QR codes
@@ -101,10 +103,11 @@ VaultKeeper is built on a flexible architecture:
 2. Use the web interface to browse assets visually through thumbnails
 3. View thumbnails or proxies to confirm the right content
 4. Review audio transcriptions to find relevant dialogue or interview segments
-5. Assign files to clients or projects for better organization
-6. Locate the physical drive using location information
-7. Check out the drive if needed or restore directly
-8. Return and check in drives after use
+5. Assign drives, folders, or individual files to clients or projects
+6. View folder-level organization within drives to better locate content
+7. Locate the physical drive using location information
+8. Check out the drive if needed or restore directly
+9. Return and check in drives after use
 
 ### 4. Retention Management
 

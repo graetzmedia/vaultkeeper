@@ -83,6 +83,7 @@
                 <table id="results-table">
                     <thead>
                         <tr>
+                            <th><input type="checkbox" id="select-all-files" title="Select all files"></th>
                             <th>Thumbnail</th>
                             <th>Filename</th>
                             <th>Drive</th>
@@ -140,12 +141,39 @@
                             <th>Size</th>
                             <th>Free Space</th>
                             <th>Date Cataloged</th>
+                            <th>Client</th>
                             <th>Actions</th>
                         </tr>
                     </thead>
                     <tbody id="drives-list">
                         <tr>
-                            <td colspan="6">Loading drives...</td>
+                            <td colspan="7">Loading drives...</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="card" id="drive-folders">
+                <h3>Drive Folders</h3>
+                <div class="form-row" style="margin-bottom: 15px;">
+                    <select id="folder-drive-select">
+                        <option value="">Select Drive</option>
+                        <!-- Drive options will be populated by JavaScript -->
+                    </select>
+                    <button id="load-folders-button" class="button">Load Folders</button>
+                </div>
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Folder Path</th>
+                            <th>Item Count</th>
+                            <th>Client</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="folders-list">
+                        <tr>
+                            <td colspan="4">Select a drive to view folders</td>
                         </tr>
                     </tbody>
                 </table>
