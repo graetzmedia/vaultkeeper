@@ -166,6 +166,9 @@ document.addEventListener('DOMContentLoaded', function() {
                         
                         // Refresh projects list with real data
                         loadProjectsList();
+                        
+                        // Also refresh client lists since this might have created a new client
+                        loadClients();
                     } else {
                         alert(`Project "${projectName}" created${clientName ? ` for client "${clientName}"` : ''}`);
                         // Mock refresh
@@ -399,6 +402,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     } else {
                         alert(`Drive assigned to client: ${clientName}`);
                     }
+                    
+                    // Refresh drives list to show all updated assignments
+                    loadDrivesList();
                 } catch (error) {
                     console.error('Error assigning client to drive:', error);
                     alert('Failed to assign client: ' + error.message);
@@ -585,7 +591,12 @@ document.addEventListener('DOMContentLoaded', function() {
                                             body: JSON.stringify({ client: newClient.name }),
                                         });
                                         
-                                        if (!driveResponse.ok) console.error('Failed to assign client to drive');
+                                        if (!driveResponse.ok) {
+                                            console.error('Failed to assign client to drive');
+                                        } else {
+                                            // Refresh drives list to show updated assignments
+                                            loadDrivesList();
+                                        }
                                     }
                                 }
                                 
@@ -605,7 +616,15 @@ document.addEventListener('DOMContentLoaded', function() {
                                             }),
                                         });
                                         
-                                        if (!folderResponse.ok) console.error('Failed to assign client to folder');
+                                        if (!folderResponse.ok) {
+                                            console.error('Failed to assign client to folder');
+                                        } else {
+                                            // Refresh folders list to show updated assignments
+                                            const driveId = selectElement.dataset.driveId;
+                                            if (driveId) {
+                                                loadFolders(driveId);
+                                            }
+                                        }
                                     }
                                 }
                                 
@@ -750,6 +769,9 @@ document.addEventListener('DOMContentLoaded', function() {
                     } else {
                         alert(`Folder ${folder.folder_path} assigned to client: ${clientName}`);
                     }
+                    
+                    // Refresh folders list to show all updated assignments
+                    loadFolders(driveId);
                 } catch (error) {
                     console.error('Error assigning client to folder:', error);
                     alert('Failed to assign client: ' + error.message);
@@ -1518,6 +1540,10 @@ document.addEventListener('DOMContentLoaded', function() {
             // Clear input and show success
             newClientName.value = '';
             alert(`Client "${clientName}" added successfully`);
+            
+            // Refresh all lists to show the new client
+            loadDrives();  // Refresh all drive dropdowns
+            loadClients(); // Refresh client filters and dropdowns
             
         } catch (error) {
             console.error('Error adding client:', error);
