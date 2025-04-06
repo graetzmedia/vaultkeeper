@@ -46,18 +46,24 @@ http://localhost:5000
 - Add new clients to the database
 - Assign files to clients for organization
 - Filter search results by client
+- Add new clients directly from any assignment dropdown
+- Real-time UI updates after client changes
 
 ### Drives Management
 
 - View all cataloged drives
 - See storage information including size and free space
 - Generate QR codes for drives
+- Assign entire drives to clients with one click
+- Browse folders within drives
+- Assign individual folders to specific clients
 
 ### Projects Management
 
 - Create and manage projects
 - Assign files to projects
 - Export project file lists to CSV
+- Automatic UI refreshing after project creation
 
 ### Reports & Analytics
 

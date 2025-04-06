@@ -72,6 +72,8 @@ VaultKeeper is built on a flexible architecture:
 - **Responsive Design**: Works on desktop and mobile devices through the web interface
 - **Client Management**: Assign drives, folders, and files to specific clients
 - **Project Organization**: Group files by project with customizable metadata
+- **Dynamic UI Updates**: Automatic refreshing after client and project changes
+- **Inline Client Creation**: Add new clients directly from any assignment dropdown
 
 ### Hardware Integration
 - **NIIMBOT Printer**: Bluetooth label printer for QR codes
