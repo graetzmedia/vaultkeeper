@@ -8,6 +8,27 @@ import json
 import uuid
 from datetime import datetime
 import mimetypes
+import sys
+
+# Add the tools directory to the Python path
+tools_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'tools')
+sys.path.append(tools_dir)
+
+# Try to import pandas-based converter first, then fall back to Go-based one if necessary
+try:
+    # Check if pandas is available
+    import pandas as pd
+    from convert_with_pandas import convert_csv_to_xlsx
+    print("Using pandas for CSV to XLSX conversion")
+    XLSX_SUPPORT = True
+except ImportError:
+    try:
+        from convert_csv_to_xlsx import convert_csv_to_xlsx
+        print("Using Go-based tool for CSV to XLSX conversion")
+        XLSX_SUPPORT = True
+    except ImportError:
+        print("Warning: CSV to XLSX conversion not available")
+        XLSX_SUPPORT = False
 
 # Initialize Flask app
 app = Flask(__name__)
@@ -93,23 +114,838 @@ def serve_thumbnail(path):
     return jsonify({'error': 'Thumbnail not found'}), 404
 
 # API routes
+@app.route('/api/locations', methods=['GET', 'POST'])
+def handle_locations():
+    if request.method == 'GET':
+        conn = get_db_connection()
+        conn.row_factory = dict_factory
+        cursor = conn.cursor()
+        
+        # Support filtering by bay, shelf, status
+        bay = request.args.get('bay')
+        shelf = request.args.get('shelf')
+        status = request.args.get('status')
+        
+        where_clauses = []
+        params = []
+        
+        if bay:
+            where_clauses.append("bay = ?")
+            params.append(int(bay))
+        if shelf:
+            where_clauses.append("shelf = ?")
+            params.append(int(shelf))
+        if status:
+            where_clauses.append("status = ?")
+            params.append(status)
+        
+        where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+        
+        # Check if locations table exists, if not create it
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'")
+        if not cursor.fetchone():
+            cursor.execute("""
+            CREATE TABLE locations (
+                id TEXT PRIMARY KEY,
+                bay INTEGER NOT NULL,
+                shelf INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                status TEXT DEFAULT 'EMPTY',
+                section TEXT,
+                notes TEXT,
+                occupied_by TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(bay, shelf, position)
+            )
+            """)
+            conn.commit()
+        
+        # Query locations
+        cursor.execute(f"""
+        SELECT id, bay, shelf, position, status, section, notes, occupied_by as occupiedBy,
+               created_at as createdAt, updated_at as updatedAt
+        FROM locations
+        WHERE {where_sql}
+        ORDER BY bay, shelf, position
+        """, params)
+        
+        locations = cursor.fetchall()
+        
+        # Convert to array and add locationId virtual field
+        for location in locations:
+            location['locationId'] = f"B{location['bay']}-S{location['shelf']}-P{location['position']}"
+        
+        conn.close()
+        return jsonify(locations)
+    
+    elif request.method == 'POST':
+        # Create a new location
+        data = request.json
+        
+        # Validate required fields
+        bay = data.get('bay')
+        shelf = data.get('shelf')
+        position = data.get('position')
+        status = data.get('status', 'EMPTY')
+        section = data.get('section')
+        notes = data.get('notes')
+        
+        if not bay or not shelf or not position:
+            return jsonify({'error': 'Bay, shelf, and position are required'}), 400
+        
+        try:
+            bay = int(bay)
+            shelf = int(shelf)
+            position = int(position)
+        except ValueError:
+            return jsonify({'error': 'Bay, shelf, and position must be integers'}), 400
+        
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        
+        # Check if locations table exists, if not create it
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'")
+        if not cursor.fetchone():
+            cursor.execute("""
+            CREATE TABLE locations (
+                id TEXT PRIMARY KEY,
+                bay INTEGER NOT NULL,
+                shelf INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                status TEXT DEFAULT 'EMPTY',
+                section TEXT,
+                notes TEXT,
+                occupied_by TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(bay, shelf, position)
+            )
+            """)
+            conn.commit()
+        
+        # Check if location already exists
+        cursor.execute("""
+        SELECT id FROM locations 
+        WHERE bay = ? AND shelf = ? AND position = ?
+        """, (bay, shelf, position))
+        
+        if cursor.fetchone():
+            conn.close()
+            return jsonify({'error': 'Location already exists'}), 400
+        
+        # Generate unique ID for the location
+        location_id = str(uuid.uuid4())
+        timestamp = datetime.now().isoformat()
+        
+        # Create the location
+        cursor.execute("""
+        INSERT INTO locations 
+            (id, bay, shelf, position, status, section, notes, created_at, updated_at) 
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (location_id, bay, shelf, position, status, section, notes, timestamp, timestamp))
+        
+        conn.commit()
+        
+        # Return the created location
+        cursor.execute("""
+        SELECT id, bay, shelf, position, status, section, notes, occupied_by as occupiedBy,
+               created_at as createdAt, updated_at as updatedAt
+        FROM locations
+        WHERE id = ?
+        """, (location_id,))
+        
+        location = cursor.fetchone()
+        conn.close()
+        
+        if location:
+            # Add the locationId virtual field
+            location = dict(location)
+            location['locationId'] = f"B{location['bay']}-S{location['shelf']}-P{location['position']}"
+            return jsonify(location), 201
+        else:
+            return jsonify({'error': 'Failed to create location'}), 500
+
+@app.route('/api/locations/batch', methods=['POST'])
+def create_batch_locations():
+    data = request.json
+    locations = data.get('locations', [])
+    
+    if not locations or not isinstance(locations, list):
+        return jsonify({'error': 'Locations array is required'}), 400
+    
+    results = {
+        'success': True,
+        'created': [],
+        'failed': [],
+        'total': len(locations)
+    }
+    
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # Check if locations table exists, if not create it
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'")
+    if not cursor.fetchone():
+        cursor.execute("""
+        CREATE TABLE locations (
+            id TEXT PRIMARY KEY,
+            bay INTEGER NOT NULL,
+            shelf INTEGER NOT NULL,
+            position INTEGER NOT NULL,
+            status TEXT DEFAULT 'EMPTY',
+            section TEXT,
+            notes TEXT,
+            occupied_by TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(bay, shelf, position)
+        )
+        """)
+        conn.commit()
+    
+    timestamp = datetime.now().isoformat()
+    
+    for location in locations:
+        try:
+            bay = int(location.get('bay'))
+            shelf = int(location.get('shelf'))
+            position = int(location.get('position'))
+            status = location.get('status', 'EMPTY')
+            section = location.get('section')
+            notes = location.get('notes')
+            
+            # Check if location already exists
+            cursor.execute("""
+            SELECT id FROM locations 
+            WHERE bay = ? AND shelf = ? AND position = ?
+            """, (bay, shelf, position))
+            
+            if cursor.fetchone():
+                results['failed'].append({
+                    'location': location,
+                    'error': 'Location already exists'
+                })
+                continue
+            
+            # Generate unique ID for the location
+            location_id = str(uuid.uuid4())
+            
+            # Create the location
+            cursor.execute("""
+            INSERT INTO locations 
+                (id, bay, shelf, position, status, section, notes, created_at, updated_at) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (location_id, bay, shelf, position, status, section, notes, timestamp, timestamp))
+            
+            conn.commit()
+            
+            results['created'].append({
+                'id': location_id,
+                'locationId': f"B{bay}-S{shelf}-P{position}"
+            })
+            
+        except Exception as e:
+            results['failed'].append({
+                'location': location,
+                'error': str(e)
+            })
+    
+    conn.close()
+    
+    # Update success flag if all locations failed
+    if len(results['failed']) > 0 and len(results['created']) == 0:
+        results['success'] = False
+    
+    status_code = 201 if results['success'] else 400
+    return jsonify(results), status_code
+
+@app.route('/api/locations/summary', methods=['GET'])
+def get_locations_summary():
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Check if locations table exists
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'")
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify({}), 200
+    
+    # Get all locations
+    cursor.execute("""
+    SELECT bay, shelf, status FROM locations
+    ORDER BY bay, shelf, position
+    """)
+    
+    locations = cursor.fetchall()
+    conn.close()
+    
+    # Create summary by bay and shelf
+    summary = {}
+    
+    for location in locations:
+        bay_key = f"Bay {location['bay']}"
+        shelf_key = f"Shelf {location['shelf']}"
+        
+        # Initialize bay if not exists
+        if bay_key not in summary:
+            summary[bay_key] = {
+                'totalLocations': 0,
+                'occupied': 0,
+                'empty': 0,
+                'shelves': {}
+            }
+        
+        # Initialize shelf if not exists
+        if shelf_key not in summary[bay_key]['shelves']:
+            summary[bay_key]['shelves'][shelf_key] = {
+                'totalLocations': 0,
+                'occupied': 0,
+                'empty': 0
+            }
+        
+        # Increment counters
+        summary[bay_key]['totalLocations'] += 1
+        summary[bay_key]['shelves'][shelf_key]['totalLocations'] += 1
+        
+        if location['status'] == 'OCCUPIED':
+            summary[bay_key]['occupied'] += 1
+            summary[bay_key]['shelves'][shelf_key]['occupied'] += 1
+        else:
+            summary[bay_key]['empty'] += 1
+            summary[bay_key]['shelves'][shelf_key]['empty'] += 1
+    
+    return jsonify(summary)
+
+@app.route('/api/locations/bays', methods=['GET'])
+def get_location_bays():
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Check if locations table exists
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'")
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify([]), 200
+    
+    # Get all unique bays
+    cursor.execute("""
+    SELECT DISTINCT bay FROM locations
+    ORDER BY bay
+    """)
+    
+    bays_data = cursor.fetchall()
+    conn.close()
+    
+    # Convert to simple array of bay numbers
+    bays = [entry['bay'] for entry in bays_data]
+    
+    return jsonify(bays)
+
+@app.route('/api/locations/shelves', methods=['GET'])
+def get_location_shelves():
+    bay = request.args.get('bay')
+    
+    if not bay:
+        return jsonify({'error': 'Bay parameter is required'}), 400
+    
+    try:
+        bay = int(bay)
+    except ValueError:
+        return jsonify({'error': 'Bay must be an integer'}), 400
+    
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Check if locations table exists
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'")
+    if not cursor.fetchone():
+        conn.close()
+        return jsonify([]), 200
+    
+    # Get all unique shelves for the specified bay
+    cursor.execute("""
+    SELECT DISTINCT shelf FROM locations
+    WHERE bay = ?
+    ORDER BY shelf
+    """, (bay,))
+    
+    shelves_data = cursor.fetchall()
+    conn.close()
+    
+    # Convert to simple array of shelf numbers
+    shelves = [entry['shelf'] for entry in shelves_data]
+    
+    return jsonify(shelves)
+
+@app.route('/api/locations/export-batch', methods=['GET'])
+def export_location_labels_batch():
+    try:
+        # Check if the user wants XLSX format
+        format_type = request.args.get('format', 'csv').lower()
+        
+        bay = request.args.get('bay')
+        shelf = request.args.get('shelf')
+        
+        if not bay:
+            return jsonify({'error': 'Bay parameter is required'}), 400
+        
+        # Build query
+        query = {}
+        params = []
+        
+        query_sql = "bay = ?"
+        params.append(int(bay))
+        
+        if shelf:
+            query_sql += " AND shelf = ?"
+            params.append(int(shelf))
+        
+        conn = get_db_connection()
+        conn.row_factory = dict_factory
+        cursor = conn.cursor()
+        
+        # Check if locations table exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'")
+        if not cursor.fetchone():
+            conn.close()
+            return jsonify({'error': 'Locations table not found'}), 404
+        
+        # Find matching locations
+        cursor.execute(f"""
+        SELECT id, bay, shelf, position, status, section, notes
+        FROM locations
+        WHERE {query_sql}
+        ORDER BY bay, shelf, position
+        """, params)
+        
+        locations = cursor.fetchall()
+        conn.close()
+        
+        if not locations or len(locations) == 0:
+            return jsonify({'error': 'No locations found matching the criteria'}), 404
+        
+        # Create CSV header with simplified columns
+        csv_header = 'QR_Code,Location_ID,Bay,Shelf,Position,Status,Section\n'
+        csv_content = csv_header
+        
+        # Add a row for each location
+        for location in locations:
+            # Generate location ID for display
+            location_id = f"B{location['bay']}-S{location['shelf']}-P{location['position']}"
+            
+            # Generate simple QR code data - just the location ID
+            qr_data = location['id']
+            
+            # Format section info
+            section = location['section'] or ''
+            
+            # Add row to CSV with simplified columns
+            csv_row = f"{qr_data},{location_id},{location['bay']},{location['shelf']},{location['position']},{location['status'] or 'EMPTY'},{section}\n"
+            
+            csv_content += csv_row
+        
+        # Determine filename based on query parameters
+        filename = f"locations_B{bay}"
+        if shelf:
+            filename += f"_S{shelf}"
+        
+        # Determine if we should convert to XLSX
+        if format_type == 'xlsx' and XLSX_SUPPORT:
+            # Convert to XLSX
+            xlsx_data = convert_csv_to_xlsx(csv_content, delimiter=',')
+            
+            if xlsx_data:
+                from flask import Response
+                response = Response(
+                    xlsx_data,
+                    mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    headers={
+                        'Content-Disposition': f'attachment; filename="{filename}.xlsx"'
+                    }
+                )
+                return response
+            else:
+                # Fall back to CSV if conversion fails
+                print("Error converting to XLSX, falling back to CSV")
+                
+        # Set headers for download as CSV (default or fallback)
+        from flask import Response
+        response = Response(
+            csv_content,
+            mimetype='text/csv',
+            headers={
+                'Content-Disposition': f'attachment; filename="{filename}.csv"'
+            }
+        )
+        
+        return response
+        
+    except Exception as error:
+        print(f'Error exporting location labels: {str(error)}')
+        return jsonify({'error': 'Failed to export location labels'}), 500
+
+@app.route('/api/locations/<location_id>/export-label', methods=['GET'])
+def export_location_label(location_id):
+    try:
+        # Check if the user wants XLSX format
+        format_type = request.args.get('format', 'csv').lower()
+        
+        # Handle the "undefined" edge case which can be sent from frontend
+        if location_id == "undefined":
+            return jsonify({'error': 'Invalid location ID'}), 400
+        
+        conn = get_db_connection()
+        conn.row_factory = dict_factory
+        cursor = conn.cursor()
+        
+        # Get location by ID
+        cursor.execute("""
+        SELECT id, bay, shelf, position, status, section, notes
+        FROM locations
+        WHERE id = ?
+        """, (location_id,))
+        
+        location = cursor.fetchone()
+        conn.close()
+        
+        if not location:
+            return jsonify({'error': 'Location not found'}), 404
+        
+        # Generate location ID for display
+        location_id_text = f"B{location['bay']}-S{location['shelf']}-P{location['position']}"
+        
+        # Generate simple QR code data - just the location ID
+        qr_data = location['id']  
+        
+        # Format section info
+        section = location['section'] or ''
+        
+        # Create CSV with the requested columns in a clear, simple format
+        csv_header = 'QR_Code,Location_ID,Bay,Shelf,Position,Status,Section\n'
+        csv_row = f"{qr_data},{location_id_text},{location['bay']},{location['shelf']},{location['position']},{location['status'] or 'EMPTY'},{section}\n"
+                  
+        csv_content = csv_header + csv_row
+        
+        # Determine if we should convert to XLSX
+        if format_type == 'xlsx' and XLSX_SUPPORT:
+            # Convert to XLSX
+            xlsx_data = convert_csv_to_xlsx(csv_content, delimiter=',')
+            
+            if xlsx_data:
+                from flask import Response
+                response = Response(
+                    xlsx_data,
+                    mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                    headers={
+                        'Content-Disposition': f'attachment; filename="location_label_{location_id_text}.xlsx"'
+                    }
+                )
+                return response
+            else:
+                # Fall back to CSV if conversion fails
+                print("Error converting to XLSX, falling back to CSV")
+        
+        # Set headers for download as CSV (default or fallback)
+        from flask import Response
+        response = Response(
+            csv_content,
+            mimetype='text/csv',
+            headers={
+                'Content-Disposition': f'attachment; filename="location_label_{location_id_text}.csv"'
+            }
+        )
+        
+        return response
+        
+    except Exception as error:
+        print(f'Error exporting location label: {str(error)}')
+        return jsonify({'error': 'Failed to export location label'}), 500
+
+@app.route('/api/locations/<location_id>', methods=['GET', 'PUT', 'DELETE'])
+def handle_location(location_id):
+    # Handle the "undefined" edge case which can be sent from frontend
+    if location_id == "undefined":
+        return jsonify({'error': 'Invalid location ID'}), 400
+        
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Check if locations table exists
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='locations'")
+    if not cursor.fetchone():
+        create_locations_table(conn)
+    
+    if request.method == 'GET':
+        # Get location by ID
+        cursor.execute("""
+        SELECT id, bay, shelf, position, status, section, notes, occupied_by as occupiedBy,
+               created_at as createdAt, updated_at as updatedAt
+        FROM locations
+        WHERE id = ?
+        """, (location_id,))
+        
+        location = cursor.fetchone()
+        
+        if not location:
+            conn.close()
+            return jsonify({'error': 'Location not found'}), 404
+        
+        # Add locationId virtual field
+        location['locationId'] = f"B{location['bay']}-S{location['shelf']}-P{location['position']}"
+        
+        conn.close()
+        return jsonify(location)
+    
+    elif request.method == 'PUT':
+        # Update location
+        data = request.json
+        
+        # Get existing location
+        cursor.execute("SELECT * FROM locations WHERE id = ?", (location_id,))
+        existing = cursor.fetchone()
+        
+        if not existing:
+            conn.close()
+            return jsonify({'error': 'Location not found'}), 404
+        
+        # Extract update fields (only update what's provided)
+        status = data.get('status')
+        section = data.get('section')
+        notes = data.get('notes')
+        occupied_by = data.get('occupiedBy')
+        timestamp = datetime.now().isoformat()
+        
+        # Prepare update query parts
+        update_parts = []
+        params = []
+        
+        if status is not None:
+            update_parts.append("status = ?")
+            params.append(status)
+        
+        if section is not None:
+            update_parts.append("section = ?")
+            params.append(section)
+        
+        if notes is not None:
+            update_parts.append("notes = ?")
+            params.append(notes)
+        
+        if occupied_by is not None:
+            update_parts.append("occupied_by = ?")
+            params.append(occupied_by)
+            
+            # If assigning drive, also update the drive's physical_location
+            if occupied_by and occupied_by != '':
+                # First check if physical_location column exists in drives table
+                cursor.execute("PRAGMA table_info(drives)")
+                columns = cursor.fetchall()
+                column_exists = False
+                for column in columns:
+                    if column['name'] == 'physical_location':
+                        column_exists = True
+                        break
+                
+                if not column_exists:
+                    cursor.execute("ALTER TABLE drives ADD COLUMN physical_location TEXT")
+                
+                # Update the drive to point to this location
+                cursor.execute("""
+                UPDATE drives
+                SET physical_location = ?
+                WHERE id = ?
+                """, (location_id, occupied_by))
+        
+        # Always update timestamp
+        update_parts.append("updated_at = ?")
+        params.append(timestamp)
+        
+        # Add location_id to params
+        params.append(location_id)
+        
+        # Execute update if there are fields to update
+        if update_parts:
+            update_sql = f"UPDATE locations SET {', '.join(update_parts)} WHERE id = ?"
+            cursor.execute(update_sql, params)
+            conn.commit()
+        
+        # Get updated location
+        cursor.execute("""
+        SELECT id, bay, shelf, position, status, section, notes, occupied_by as occupiedBy,
+               created_at as createdAt, updated_at as updatedAt
+        FROM locations
+        WHERE id = ?
+        """, (location_id,))
+        
+        updated_location = cursor.fetchone()
+        
+        if updated_location:
+            # Add locationId virtual field
+            updated_location['locationId'] = f"B{updated_location['bay']}-S{updated_location['shelf']}-P{updated_location['position']}"
+            
+            # Get drive details if occupied
+            if updated_location['occupiedBy']:
+                cursor.execute("""
+                SELECT id, label, volume_name as volumeName
+                FROM drives
+                WHERE id = ?
+                """, (updated_location['occupiedBy'],))
+                
+                drive = cursor.fetchone()
+                if drive:
+                    updated_location['driveDetails'] = drive
+        
+        conn.close()
+        return jsonify(updated_location)
+    
+    elif request.method == 'DELETE':
+        # Delete location
+        cursor.execute("DELETE FROM locations WHERE id = ?", (location_id,))
+        
+        if cursor.rowcount == 0:
+            conn.close()
+            return jsonify({'error': 'Location not found'}), 404
+        
+        conn.commit()
+        conn.close()
+        
+        return jsonify({'message': 'Location deleted successfully'})
+
+# Helper function to create locations table
+def create_locations_table(conn):
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE locations (
+        id TEXT PRIMARY KEY,
+        bay INTEGER NOT NULL,
+        shelf INTEGER NOT NULL,
+        position INTEGER NOT NULL,
+        status TEXT DEFAULT 'EMPTY',
+        section TEXT,
+        notes TEXT,
+        occupied_by TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(bay, shelf, position)
+    )
+    """)
+    conn.commit()
+
+@app.route('/api/drives/<drive_id>/assign-location', methods=['POST'])
+def assign_drive_to_location(drive_id):
+    data = request.json
+    location_id = data.get('locationId')
+    
+    if not location_id:
+        return jsonify({'error': 'Location ID is required'}), 400
+    
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Verify drive exists
+    cursor.execute("SELECT id FROM drives WHERE id = ?", (drive_id,))
+    drive = cursor.fetchone()
+    
+    if not drive:
+        conn.close()
+        return jsonify({'error': 'Drive not found'}), 404
+    
+    # Verify location exists
+    cursor.execute("SELECT id, status, occupied_by FROM locations WHERE id = ?", (location_id,))
+    location = cursor.fetchone()
+    
+    if not location:
+        conn.close()
+        return jsonify({'error': 'Location not found'}), 404
+    
+    # Check if location is already occupied by another drive
+    if location['status'] == 'OCCUPIED' and location['occupied_by'] and location['occupied_by'] != drive_id:
+        conn.close()
+        return jsonify({'error': 'Location is already occupied by another drive'}), 400
+    
+    # Update location to be occupied by this drive
+    timestamp = datetime.now().isoformat()
+    cursor.execute("""
+    UPDATE locations
+    SET status = 'OCCUPIED', occupied_by = ?, updated_at = ?
+    WHERE id = ?
+    """, (drive_id, timestamp, location_id))
+    
+    # Also update drive to record its location
+    cursor.execute("""
+    UPDATE drives
+    SET physical_location = ?
+    WHERE id = ?
+    """, (location_id, drive_id))
+    
+    conn.commit()
+    
+    # Get updated location
+    cursor.execute("""
+    SELECT id, bay, shelf, position, status, section, notes, occupied_by as occupiedBy,
+           created_at as createdAt, updated_at as updatedAt
+    FROM locations
+    WHERE id = ?
+    """, (location_id,))
+    
+    updated_location = cursor.fetchone()
+    updated_location['locationId'] = f"B{updated_location['bay']}-S{updated_location['shelf']}-P{updated_location['position']}"
+    
+    conn.close()
+    
+    return jsonify({
+        'status': 'success',
+        'message': f"Drive {drive_id} assigned to location {updated_location['locationId']}",
+        'location': updated_location
+    })
+
 @app.route('/api/drives', methods=['GET'])
 def get_drives():
     conn = get_db_connection()
     conn.row_factory = dict_factory
     cursor = conn.cursor()
     
-    cursor.execute("""
-    SELECT id, label, volume_name as volumeName, size_bytes as sizeBytes, 
-           free_bytes as freeBytes, format, mount_point as mountPoint, 
-           date_cataloged as dateCataloged, last_verified as lastVerified
-    FROM drives
-    ORDER BY date_cataloged DESC
-    """)
+    # Check if physical_location column exists in drives table
+    cursor.execute("PRAGMA table_info(drives)")
+    columns = cursor.fetchall()
+    if 'physical_location' not in [column['name'] for column in columns]:
+        # Add physical_location column if it doesn't exist
+        cursor.execute("ALTER TABLE drives ADD COLUMN physical_location TEXT")
+        conn.commit()
+    
+    # Get drives with optional location filter
+    location_id = request.args.get('locationId')
+    
+    if location_id:
+        cursor.execute("""
+        SELECT id, label, volume_name as volumeName, size_bytes as sizeBytes, 
+               free_bytes as freeBytes, format, mount_point as mountPoint, 
+               date_cataloged as dateCataloged, last_verified as lastVerified,
+               physical_location as physicalLocation
+        FROM drives
+        WHERE physical_location = ?
+        ORDER BY date_cataloged DESC
+        """, (location_id,))
+    else:
+        cursor.execute("""
+        SELECT id, label, volume_name as volumeName, size_bytes as sizeBytes, 
+               free_bytes as freeBytes, format, mount_point as mountPoint, 
+               date_cataloged as dateCataloged, last_verified as lastVerified,
+               physical_location as physicalLocation
+        FROM drives
+        ORDER BY date_cataloged DESC
+        """)
     
     drives = cursor.fetchall()
     
     # For each drive, determine if it has a project associating it with a client
+    # and fetch location details if available
     for drive in drives:
         # Look for projects that seem to be related to this drive
         cursor.execute("""
@@ -121,6 +957,22 @@ def get_drives():
         
         client_result = cursor.fetchone()
         drive['client'] = client_result['client'] if client_result else None
+        
+        # If drive has a physical location, fetch the location details
+        if drive.get('physicalLocation'):
+            cursor.execute("""
+            SELECT bay, shelf, position
+            FROM locations
+            WHERE id = ?
+            """, (drive['physicalLocation'],))
+            
+            location = cursor.fetchone()
+            if location:
+                drive['locationId'] = f"B{location['bay']}-S{location['shelf']}-P{location['position']}"
+            else:
+                drive['locationId'] = None
+        else:
+            drive['locationId'] = None
     
     conn.close()
     
@@ -128,10 +980,13 @@ def get_drives():
 
 @app.route('/api/drives/<drive_id>/export-label', methods=['GET'])
 def export_drive_label(drive_id):
-    """Export drive label as CSV for Niimbot thermal printer"""
+    """Export drive label as CSV or XLSX for Niimbot thermal printer with specific columns"""
     conn = get_db_connection()
     conn.row_factory = dict_factory
     cursor = conn.cursor()
+    
+    # Check if the user wants XLSX format
+    format_type = request.args.get('format', 'csv').lower()
     
     # Verify drive exists
     cursor.execute("SELECT id, label, volume_name, date_cataloged FROM drives WHERE id = ?", (drive_id,))
@@ -150,53 +1005,55 @@ def export_drive_label(drive_id):
     """, (drive_id,))
     
     folders = cursor.fetchall()
-    root_folders = '\n'.join([f['folder'] for f in folders])
+    root_folders = ', '.join([f['folder'] for f in folders])
     
-    # Get media stats
+    # Try to get earliest creation year from files
     cursor.execute("""
-    SELECT extension, COUNT(*) as count
+    SELECT MIN(SUBSTR(date_created, 1, 4)) as earliest_year
     FROM files
-    WHERE drive_id = ?
-    GROUP BY extension
+    WHERE drive_id = ? AND date_created IS NOT NULL AND date_created != ''
     """, (drive_id,))
     
-    stats = cursor.fetchall()
-    media_stats = '\n'.join([f"{item['extension']}: {item['count']}" for item in stats])
+    year_result = cursor.fetchone()
+    earliest_year = year_result['earliest_year'] if year_result and year_result['earliest_year'] else ''
+    
+    # Get catalog date
+    date_added = drive['date_cataloged'].split('T')[0] if drive['date_cataloged'] and 'T' in drive['date_cataloged'] else ''
+    
+    # Generate simple QR code data with just the drive ID
+    qr_data = drive['id']
+    
+    # Get a clean drive name
+    drive_name = drive['label'] or drive['volume_name'] or f"Drive {drive['id']}"
     
     conn.close()
     
-    # Generate QR code data
-    import json
-    qr_data = json.dumps({
-        'type': 'drive',
-        'id': drive['id'],
-        'name': drive['label'] or drive['volume_name'],
-        'date': drive['date_cataloged']
-    })
-    
-    # Format CSV data
-    date = drive['date_cataloged'].split('T')[0] if drive['date_cataloged'] and 'T' in drive['date_cataloged'] else ''
-    
-    # Create a single formatted text for the complete label
-    label_text = f"{drive['label'] or drive['volume_name'] or 'Unnamed Drive'}\n" + \
-                 f"ID: {drive['id']}\n" + \
-                 f"{root_folders}\n" + \
-                 f"{media_stats}\n" + \
-                 f"Added: {date}"
-    
-    # Create CSV header and content
-    csv_header = 'Drive_ID,Drive_Name,Root_Folders,Media_Stats,Date_Added,QR_Code_Data,Label_Text\n'
-    csv_row = f"\"{drive['id']}\","\
-             f"\"{drive['label'] or drive['volume_name'] or 'Unnamed Drive'}\","\
-             f"\"{root_folders}\","\
-             f"\"{media_stats}\","\
-             f"\"{date}\","\
-             f"\"{qr_data}\","\
-             f"\"{label_text}\"\n"
+    # Create CSV with the requested columns in a clear, simple format
+    csv_header = 'QR_Code,Drive_Name,Root_Folders,Drive_ID,Creation_Year\n'
+    csv_row = f"{qr_data},{drive_name},{root_folders},{drive['id']},{earliest_year}\n"
     
     csv_content = csv_header + csv_row
     
-    # Set headers for download
+    # Determine if we should convert to XLSX
+    if format_type == 'xlsx' and XLSX_SUPPORT:
+        # Convert to XLSX
+        xlsx_data = convert_csv_to_xlsx(csv_content, delimiter=',')
+        
+        if xlsx_data:
+            from flask import Response
+            response = Response(
+                xlsx_data,
+                mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                headers={
+                    'Content-Disposition': f'attachment; filename=drive_label_{drive["id"]}.xlsx'
+                }
+            )
+            return response
+        else:
+            # Fall back to CSV if conversion fails
+            print("Error converting to XLSX, falling back to CSV")
+            
+    # Set headers for download as CSV (default or fallback)
     from flask import Response
     response = Response(
         csv_content,
@@ -296,16 +1153,40 @@ def get_drive_folders(drive_id):
     
     # Get client assignments for each folder (if any)
     for folder in folders:
+        # For each folder, get the most recent project that specifically targets this folder
         cursor.execute("""
-        SELECT DISTINCT p.client
+        SELECT p.id, p.client, p.date_created
         FROM projects p
-        JOIN project_files pf ON p.id = pf.project_id
-        JOIN files f ON pf.file_id = f.id
-        WHERE f.drive_id = ? AND f.path LIKE ?
-        """, (drive_id, folder['folder_path'] + '/%'))
+        WHERE p.name LIKE ? AND p.notes LIKE ?
+        ORDER BY p.date_created DESC
+        LIMIT 1
+        """, (f"Folder: {folder['folder_path']}%", f"%Folder assignment for {folder['folder_path']}%"))
         
-        client_result = cursor.fetchone()
-        folder['client'] = client_result['client'] if client_result else None
+        folder_project = cursor.fetchone()
+        
+        if folder_project:
+            folder['client'] = folder_project['client']
+            folder['project_id'] = folder_project['id']
+        else:
+            # If no specific folder project, check files within this folder
+            cursor.execute("""
+            SELECT DISTINCT p.client, p.id
+            FROM projects p
+            JOIN project_files pf ON p.id = pf.project_id
+            JOIN files f ON pf.file_id = f.id
+            WHERE f.drive_id = ? AND f.path LIKE ?
+            ORDER BY p.date_created DESC
+            LIMIT 1
+            """, (drive_id, folder['folder_path'] + '/%'))
+            
+            client_result = cursor.fetchone()
+            
+            if client_result:
+                folder['client'] = client_result['client']
+                folder['project_id'] = client_result['id']
+            else:
+                folder['client'] = None
+                folder['project_id'] = None
     
     conn.close()
     
@@ -392,16 +1273,53 @@ def assign_folder_to_client():
         conn.close()
         return jsonify({'error': 'Drive not found'}), 404
     
-    # Create a project for this folder
-    drive_name = drive['label'] or drive['volume_name'] or drive['id']
-    project_id = str(uuid.uuid4())
-    project_name = f"Folder: {folder_path} ({drive_name})"
-    
+    # Check if this folder already has an explicit project assignment
     cursor.execute("""
-    INSERT INTO projects (id, name, client, date_created, notes)
-    VALUES (?, ?, ?, ?, ?)
-    """, (project_id, project_name, client_name, datetime.now().isoformat(), 
-          f"Folder assignment for {folder_path} on drive {drive_name}"))
+    SELECT id, client FROM projects 
+    WHERE name LIKE ? AND notes LIKE ?
+    ORDER BY date_created DESC
+    LIMIT 1
+    """, (f"Folder: {folder_path}%", f"%Folder assignment for {folder_path}%"))
+    
+    existing_project = cursor.fetchone()
+    
+    if existing_project:
+        # If this folder already has a project but with a different client,
+        # we'll update the existing project instead of creating a new one
+        if existing_project['client'] != client_name:
+            cursor.execute("""
+            UPDATE projects 
+            SET client = ?, date_created = ?
+            WHERE id = ?
+            """, (client_name, datetime.now().isoformat(), existing_project['id']))
+            
+            project_id = existing_project['id']
+            
+            # Log the update for debugging
+            print(f"Updated project {project_id} for folder {folder_path} from client '{existing_project['client']}' to '{client_name}'")
+        else:
+            # Already assigned to this client, nothing to do
+            project_id = existing_project['id']
+            conn.close()
+            return jsonify({
+                'status': 'success',
+                'drive_id': drive_id,
+                'folder_path': folder_path,
+                'client': client_name,
+                'project_id': project_id,
+                'message': 'Folder already assigned to this client, no changes made'
+            })
+    else:
+        # Create a new project for this folder
+        drive_name = drive['label'] or drive['volume_name'] or drive['id']
+        project_id = str(uuid.uuid4())
+        project_name = f"Folder: {folder_path} ({drive_name})"
+        
+        cursor.execute("""
+        INSERT INTO projects (id, name, client, date_created, notes)
+        VALUES (?, ?, ?, ?, ?)
+        """, (project_id, project_name, client_name, datetime.now().isoformat(), 
+              f"Folder assignment for {folder_path} on drive {drive_name}"))
     
     # Get all files from this folder
     cursor.execute("""
@@ -411,7 +1329,29 @@ def assign_folder_to_client():
     
     files = cursor.fetchall()
     
-    # Assign all files to the project
+    # Remove any previous project assignments for these files
+    file_ids = [file['id'] for file in files]
+    if file_ids:
+        placeholders = ','.join(['?'] * len(file_ids))
+        
+        # Get all project IDs for these files that aren't the current project
+        cursor.execute(f"""
+        SELECT DISTINCT project_id
+        FROM project_files
+        WHERE file_id IN ({placeholders}) AND project_id != ?
+        """, file_ids + [project_id])
+        
+        old_project_ids = [row['project_id'] for row in cursor.fetchall()]
+        
+        # Remove these files from their old projects
+        if old_project_ids:
+            for old_project_id in old_project_ids:
+                cursor.execute(f"""
+                DELETE FROM project_files
+                WHERE project_id = ? AND file_id IN ({placeholders})
+                """, [old_project_id] + file_ids)
+    
+    # Assign all files to the new/updated project
     for file in files:
         cursor.execute("""
         INSERT OR IGNORE INTO project_files (project_id, file_id)

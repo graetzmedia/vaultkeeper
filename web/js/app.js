@@ -442,7 +442,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     console.log('Using drive ID:', driveId);
                     
                     // Try the drives endpoint first
-                    const url = `${API_BASE_URL}/api/drives/${driveId}/export-label`;
+                    const url = `${API_BASE_URL}/api/drives/${driveId}/export-label?format=xlsx`;
                     console.log('Opening URL:', url);
                     window.open(url, '_blank');
                 } else {
@@ -2342,7 +2342,7 @@ document.addEventListener('DOMContentLoaded', function() {
             // Create status dropdown for changing status
             const statusSelect = document.createElement('select');
             statusSelect.className = 'location-status-select';
-            statusSelect.dataset.locationId = location._id;
+            statusSelect.dataset.locationId = location.id;
             
             const statusOptions = ['EMPTY', 'OCCUPIED', 'RESERVED', 'MAINTENANCE'];
             statusOptions.forEach(opt => {
@@ -2443,12 +2443,12 @@ document.addEventListener('DOMContentLoaded', function() {
                 const addNoteButton = document.createElement('button');
                 addNoteButton.className = 'button small';
                 addNoteButton.textContent = '+ Add Note';
-                addNoteButton.dataset.locationId = location._id;
+                addNoteButton.dataset.locationId = location.id;
                 
                 addNoteButton.addEventListener('click', function() {
                     const note = prompt('Enter a note for this location:');
                     if (note !== null) {
-                        addNoteToLocation(location._id, note, notesCell);
+                        addNoteToLocation(location.id, note, notesCell);
                     }
                 });
                 
@@ -2461,7 +2461,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const assignDriveButton = document.createElement('button');
             assignDriveButton.className = 'button small';
             assignDriveButton.textContent = 'Assign Drive';
-            assignDriveButton.dataset.locationId = location._id;
+            assignDriveButton.dataset.locationId = location.id;
             
             assignDriveButton.addEventListener('click', async function() {
                 try {
@@ -2532,7 +2532,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         document.body.removeChild(dialog);
                         
                         // Assign drive to location
-                        assignDriveToLocation(location._id, driveId, occupiedByCell, statusSelect);
+                        assignDriveToLocation(location.id, driveId, occupiedByCell, statusSelect);
                     };
                     
                     form.appendChild(document.createElement('br'));
@@ -2557,8 +2557,8 @@ document.addEventListener('DOMContentLoaded', function() {
             
             exportLabelButton.addEventListener('click', function() {
                 if (USE_BACKEND) {
-                    window.open(`${API_BASE_URL}/api/locations/${location._id}/export-label`, '_blank');
-                    console.log(`Export URL: ${API_BASE_URL}/api/locations/${location._id}/export-label`);
+                    window.open(`${API_BASE_URL}/api/locations/${location.id}/export-label?format=xlsx`, '_blank');
+                    console.log(`Export URL: ${API_BASE_URL}/api/locations/${location.id}/export-label?format=xlsx`);
                 } else {
                     alert(`Export Label for Location: ${location.locationId}`);
                 }
@@ -2866,7 +2866,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (USE_BACKEND) {
                     // Extract bay number from bay key (format: "Bay X")
                     const bayNumber = bayKey.split(' ')[1];
-                    window.open(`${API_BASE_URL}/api/locations/export-batch?bay=${bayNumber}`, '_blank');
+                    window.open(`${API_BASE_URL}/api/locations/export-batch?bay=${bayNumber}&format=xlsx`, '_blank');
                 } else {
                     alert(`Export Labels for ${bayKey}`);
                 }
@@ -2955,7 +2955,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         // Extract bay and shelf numbers
                         const bayNumber = bayKey.split(' ')[1];
                         const shelfNumber = shelfKey.split(' ')[1];
-                        window.open(`${API_BASE_URL}/api/locations/export-batch?bay=${bayNumber}&shelf=${shelfNumber}`, '_blank');
+                        window.open(`${API_BASE_URL}/api/locations/export-batch?bay=${bayNumber}&shelf=${shelfNumber}&format=xlsx`, '_blank');
                     } else {
                         alert(`Export Labels for ${bayKey}, ${shelfKey}`);
                     }
@@ -3365,7 +3365,7 @@ document.addEventListener('DOMContentLoaded', function() {
         exportButton.textContent = 'Export Label';
         exportButton.onclick = function() {
             if (USE_BACKEND) {
-                window.open(`${API_BASE_URL}/api/locations/${location._id}/export-label`, '_blank');
+                window.open(`${API_BASE_URL}/api/locations/${location.id}/export-label?format=xlsx`, '_blank');
                 document.body.removeChild(dialog);
             } else {
                 alert(`Export Label for Location: ${location.locationId}`);
