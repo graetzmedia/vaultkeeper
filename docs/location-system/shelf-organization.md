@@ -210,12 +210,24 @@ The system also provides API endpoints for label management:
    - Create, update, and query physical locations
    - Generate labels for locations
 
-## Direct vs. Manual Printing
+## Printing Options
 
-The system supports two printing methods:
+The system supports three methods for printing labels:
 
 1. **Direct Printing**: When a compatible NIIMBOT printer is connected directly to the server, the system can print labels automatically.
 
-2. **Manual Printing**: All labels are saved as PNG files in the `public/labels` directory, which can be transferred to a mobile device and printed using the NIIMBOT mobile app.
+2. **PNG Export**: All labels are saved as PNG files in the `public/labels` directory, which can be transferred to a mobile device and printed using the NIIMBOT mobile app.
+
+3. **CSV/Excel Export**: Generate CSV files that can be imported directly into the NIIMBOT app, which handles the formatting and layout for optimal printing quality:
+   ```
+   node scripts/generate-label-spreadsheets.js
+   ```
+   This interactive script allows you to:
+   - Generate drive labels, location labels, or both
+   - Use real data from the database or test data
+   - Create labels for a range of shelf locations
+   - Include QR codes, drive contents, and metadata
+
+   The generated CSV files can be transferred to your mobile device and imported directly into the NIIMBOT app's label creation interface.
 
 By following this system, you'll maintain full tracking capabilities while allowing for flexible physical organization that can adapt to your changing storage needs.
