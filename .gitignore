@@ -59,3 +59,12 @@ Thumbs.db
 *.njsproj
 *.sln
 *.sw?
+
+# Test scripts and temporary files
+test_*.py
+*_test.py
+*.py.bak
+*.sh.bak
+simple_*.py
+temp_*.py
+process_*.py
