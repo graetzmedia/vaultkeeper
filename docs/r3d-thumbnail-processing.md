@@ -75,15 +75,43 @@ Options:
 - `--limit`: Process only a specific number of files
 - `--timeout`: Set maximum processing time per clip in seconds
 
+### 3. Usage in VaultKeeper Menu System
+
+The REDline-based thumbnail generation is automatically integrated into the main VaultKeeper system. When cataloging drives through the menu system (`vaultkeeper-menu.sh`), R3D thumbnail generation will be performed using the methods described above.
+
+For existing drives that were cataloged before this feature was implemented, use the standalone utility:
+
+```bash
+./redline_single_frame.py --drive <drive_name_or_id>
+```
+
 ## Special Considerations
 
-1. **RDC Folder Structure**: For R3D files in an RDC folder structure, thumbnails are generated per-clip rather than per-file to avoid duplicates.
+1. **RDC Folder Structure**: For R3D files in an RDC folder structure, thumbnails are generated per-clip rather than per-file to avoid duplicates:
+   - The system detects RDC folders (RED Digital Cinema's standard folder structure)
+   - It identifies clip prefixes (e.g., A001_C001) in filenames
+   - Only one representative file (typically a middle frame) is processed for each unique RDC+clip combination
+   - The same thumbnail is applied to all files in the same clip/RDC group
+   - This avoids generating unnecessary thumbnails for "chunked" recordings split across multiple files
 
 2. **Large Files**: Files over 1GB may be skipped by default to avoid excessive processing time.
 
 3. **Timeouts**: REDline processing can be slow, especially on the first run when compiling OpenCL kernels. We implement timeouts to prevent indefinite hanging.
 
 4. **Metadata**: The system doesn't currently extract comprehensive metadata from R3D files.
+
+5. **Batch Processing**: When multiple files belong to the same RDC folder group, database updates are handled in batches to improve performance and avoid query parameter limits.
+
+## Installation Requirements
+
+To use the R3D thumbnail generation features:
+
+1. Install the REDline command-line tool from RED:
+   - Download the REDline installer (e.g., REDline_Build_60.52530_Installer.sh)
+   - Make it executable: `chmod +x REDline_Build_60.52530_Installer.sh`
+   - Run the installer: `./REDline_Build_60.52530_Installer.sh`
+
+2. REDline will be installed to `/usr/local/bin/REDline` by default
 
 ## Future Improvements
 

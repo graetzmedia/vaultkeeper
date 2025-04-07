@@ -1075,6 +1075,35 @@ def catalog_files(drive_info, conn=None):
     skipped_count = 0
     r3d_count = 0  # Counter for .r3d files
     
+    # Track RDC folders that have already had thumbnails generated
+    processed_rdc_folders = {}  # Maps RDC folder keys to thumbnail paths
+    
+    # Function to update multiple files with the same thumbnail (for RDC folders)
+    def update_thumbnails_for_rdc_files(file_ids, thumbnail_path, cursor):
+        """Update multiple files in the database with the same thumbnail path"""
+        if not file_ids:
+            return 0
+            
+        total_updated = 0
+        
+        # Update files in batches to avoid SQLite parameter limits
+        batch_size = 100
+        batches = [file_ids[i:i+batch_size] for i in range(0, len(file_ids), batch_size)]
+        
+        for batch in batches:
+            placeholders = ','.join(['?'] * len(batch))
+            query = f"UPDATE files SET thumbnail_path = ? WHERE id IN ({placeholders})"
+            params = [thumbnail_path] + batch
+            
+            try:
+                cursor.execute(query, params)
+                batch_updated = cursor.rowcount
+                total_updated += batch_updated
+            except Exception as e:
+                print(f"Error updating batch of files: {e}")
+        
+        return total_updated
+    
     # Count total files for progress reporting
     print("\nCounting files (initial scan)...")
     file_count = 0
@@ -1143,21 +1172,40 @@ def catalog_files(drive_info, conn=None):
                 if is_r3d:
                     r3d_count += 1
                     
+                    # Get a more robust RDC folder key
+                    rdc_key = None
+                    rdc_file_id = str(uuid.uuid4())  # Generate file ID here for potential batch updates
+                    
                     # Check if this is in an RDC folder structure
                     file_dir = os.path.dirname(file_path)
-                    if os.path.basename(file_dir).upper() == "RDC" or "RDC" in file_dir:
+                    is_rdc = False
+                    
+                    # Look for RDC folder in path parts
+                    path_parts = os.path.normpath(file_dir).split(os.sep)
+                    for part in path_parts:
+                        if part.upper() == "RDC" or part.upper().endswith(".RDC"):
+                            is_rdc = True
+                            # Extract clip prefix from filename for more precise grouping
+                            file_name = os.path.basename(file_path)
+                            clip_match = re.match(r'^([A-Z]\d{3}_[A-Z]\d{3}).*\.[Rr]3[Dd]$', file_name)$', file_name)
+                            
+                            # Build a key that combines RDC folder and clip prefix when available
+                            if clip_match:
+                                clip_prefix = clip_match.group(1)  # e.g., A001_C001
+                                rdc_key = f"{part}_{clip_prefix}"
+                            else:
+                                # Fall back to RDC folder name if no clip pattern found
+                                rdc_key = part
+                                
+                            break
+                            
+                    if is_rdc:
                         # This is in an RDC folder - process all chunks as one logical clip
-                        # Extract the parent+RDC folder as the logical clip identifier
-                        parent_dir = os.path.dirname(file_dir)
-                        rdc_name = os.path.basename(file_dir)
-                        parent_name = os.path.basename(parent_dir)
-                        rdc_key = f"{parent_name}_{rdc_name}"
-                        
-                        # Record the first file of each RDC folder we encounter
+                        # Record files from this RDC folder for batch updating
                         if r3d_count % 10 == 0 or "001.R3D" in file_path.upper():
                             print(f"\nProcessed {r3d_count} R3D files so far.")
-                            print(f"RDC folder: {file_dir}")
-                            print(f"First file in clip: {rel_path}")
+                            print(f"RDC folder: {file_dir} (key: {rdc_key})")
+                            print(f"File in clip: {rel_path}")
                     else:
                         # Not in an RDC structure, just a regular R3D file
                         # Print a message every 10 r3d files
@@ -1210,7 +1258,37 @@ def catalog_files(drive_info, conn=None):
                     
                     # Use R3D-specific handling for .r3d files
                     if is_r3d:
-                        thumbnail_path = generate_r3d_thumbnail(file_path, thumbnail_dir)
+                        # Use the previously detected RDC key
+                        if is_rdc and rdc_key:
+                            # Check if we've already processed this RDC folder
+                            if rdc_key in processed_rdc_folders:
+                                # Reuse the existing thumbnail
+                                print(f"Reusing existing thumbnail for RDC folder: {rdc_key}")
+                                thumbnail_path = processed_rdc_folders[rdc_key]
+                            else:
+                                # Generate new thumbnail for this RDC folder
+                                print(f"Generating thumbnail for RDC folder: {rdc_key}")
+                                
+                                # Try to select a representative file (middle file in sequence)
+                                # This matches the behavior in redline_single_frame.py
+                                file_name = os.path.basename(file_path)
+                                if "001.R3D" in file_name.upper() and not "_C001_" in file_name.upper():
+                                    # This is likely the first file, store but don't generate yet
+                                    processed_rdc_folders[rdc_key] = "PENDING"
+                                    thumbnail_path = None
+                                elif processed_rdc_folders.get(rdc_key) == "PENDING":
+                                    # Generate thumbnail from this file (not the first)
+                                    thumbnail_path = generate_r3d_thumbnail(file_path, thumbnail_dir, rdc_key=rdc_key)
+                                    if thumbnail_path:
+                                        processed_rdc_folders[rdc_key] = thumbnail_path
+                                else:
+                                    # Some other file in the RDC folder
+                                    thumbnail_path = generate_r3d_thumbnail(file_path, thumbnail_dir, rdc_key=rdc_key)
+                                    if thumbnail_path:
+                                        processed_rdc_folders[rdc_key] = thumbnail_path
+                        else:
+                            # Not in an RDC folder, process normally
+                            thumbnail_path = generate_r3d_thumbnail(file_path, thumbnail_dir)
                     else:
                         thumbnail_path = generate_video_thumbnail(file_path, thumbnail_dir)
                         
@@ -1222,6 +1300,14 @@ def catalog_files(drive_info, conn=None):
                     media_info = get_media_info(file_path)
                     if media_info:
                         print(f"\nExtracted media info for: {rel_path}")
+                
+                # For .r3d files in RDC folders, use the RDC folder's thumbnail
+                if is_r3d and is_rdc and rdc_key and rdc_key in processed_rdc_folders:
+                    if processed_rdc_folders[rdc_key] != "PENDING":
+                        # Update thumbnail path from the RDC folder's cached thumbnail
+                        thumbnail_path = processed_rdc_folders[rdc_key]
+                        if thumbnail_path:
+                            print(f"Using shared RDC folder thumbnail for: {rel_path}")
                 
                 # Store file info in database without transcription (will be processed later)
                 cursor.execute('''

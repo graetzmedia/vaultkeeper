@@ -14,6 +14,7 @@ import time
 import uuid
 import shutil
 import subprocess
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -67,6 +68,7 @@ def find_r3d_files_without_thumbnails(drive_id, drive_mount_point):
         """, (drive_id,))
         
         r3d_files = cursor.fetchall()
+        print(f"Found {len(r3d_files)} R3D files without thumbnails in database")
         
         # Convert to full paths
         full_paths = []
@@ -77,6 +79,7 @@ def find_r3d_files_without_thumbnails(drive_id, drive_mount_point):
             else:
                 print(f"Warning: File {rel_path} not found at {full_path}")
         
+        print(f"Successfully resolved {len(full_paths)} full paths")
         return full_paths
     finally:
         conn.close()
@@ -94,6 +97,50 @@ def update_thumbnail_path(file_id, thumbnail_path):
         """, (thumbnail_path, file_id))
         conn.commit()
         return cursor.rowcount
+    finally:
+        conn.close()
+
+def update_thumbnails_for_rdc_group(file_ids, thumbnail_path):
+    """Update the thumbnail path for all files in an RDC group"""
+    if not file_ids:
+        print("ERROR: No file IDs provided to update_thumbnails_for_rdc_group")
+        return 0
+        
+    print(f"Updating {len(file_ids)} files with thumbnail: {thumbnail_path}")
+    print(f"File IDs: {file_ids[:5]}{'...' if len(file_ids) > 5 else ''}")
+    
+    total_updated = 0
+    conn = sqlite3.connect(DB_PATH)
+    
+    try:
+        # Update files in batches to avoid query parameter limits
+        batch_size = 100
+        batches = [file_ids[i:i+batch_size] for i in range(0, len(file_ids), batch_size)]
+        
+        print(f"Updating files in {len(batches)} batches of max {batch_size} each")
+        
+        for batch_idx, batch in enumerate(batches):
+            cursor = conn.cursor()
+            placeholders = ','.join(['?'] * len(batch))
+            query = f"UPDATE files SET thumbnail_path = ? WHERE id IN ({placeholders})"
+            params = [thumbnail_path] + batch
+            
+            # Execute the update for this batch
+            try:
+                cursor.execute(query, params)
+                conn.commit()
+                batch_updated = cursor.rowcount
+                total_updated += batch_updated
+                print(f"Batch {batch_idx+1}/{len(batches)}: Updated {batch_updated}/{len(batch)} files")
+            except Exception as e:
+                print(f"Error in batch {batch_idx+1}: {e}")
+                conn.rollback()
+        
+        print(f"Successfully updated {total_updated} out of {len(file_ids)} files")
+        return total_updated
+    except Exception as e:
+        print(f"ERROR in update_thumbnails_for_rdc_group: {e}")
+        return 0
     finally:
         conn.close()
 
@@ -122,7 +169,7 @@ def get_clip_duration(clip_path):
         print(f"Warning: Could not determine clip duration: {e}")
         return 100  # Default to 100 frames
 
-def extract_single_frame(r3d_path, output_dir, frame_number=None, width=320, height=240, timeout=300):
+def extract_single_frame(r3d_path, output_dir, frame_number=None, width=640, height=480, timeout=300):
     """
     Extract a single frame from an R3D file using REDline
     
@@ -230,6 +277,159 @@ def extract_single_frame(r3d_path, output_dir, frame_number=None, width=320, hei
         except Exception as e:
             print(f"Error cleaning up temporary directory: {e}")
 
+def extract_clip_info(file_path):
+    """
+    Extract clip information from a RED file path
+    Returns a tuple of (clip_prefix, rdc_folder_name)
+    """
+    # Extract clip name pattern (like A001_C001)
+    file_name = os.path.basename(file_path)
+    clip_match = re.match(r'^([A-Z]\d{3}_[A-Z]\d{3}).*\.[Rr]3[Dd]$', file_name)
+    clip_prefix = clip_match.group(1) if clip_match else None
+    
+    # Look for RDC folder in path
+    norm_path = os.path.normpath(file_path)
+    path_parts = norm_path.split(os.sep)
+    
+    rdc_folder = None
+    for part in path_parts:
+        if part.upper().endswith(".RDC"):
+            rdc_folder = part
+            break
+    
+    return (clip_prefix, rdc_folder)
+
+def get_rdc_group_key(file_path):
+    """
+    Generate a unique key for grouping R3D files from the same clip.
+    
+    The key is based on:
+    1. The RDC folder name if present
+    2. The clip prefix (A001_C001) if present
+    3. A combination of both if both are present
+    
+    Returns None if not an R3D file or can't determine grouping
+    """
+    # Only process R3D files
+    if not file_path.upper().endswith('.R3D'):
+        return None
+    
+    try:
+        # Extract the directory containing the file
+        dir_path = os.path.dirname(file_path)
+        
+        # Try to find RDC folder in the path
+        path_parts = os.path.normpath(dir_path).split(os.sep)
+        rdc_folder = None
+        
+        # Look for RDC folder (either named RDC or ending with .RDC)
+        for part in path_parts:
+            if part.upper() == "RDC" or part.upper().endswith(".RDC"):
+                rdc_folder = part
+                break
+        
+        # If no RDC folder found, this is a standalone R3D file
+        if not rdc_folder:
+            return None
+            
+        # Extract clip info from filename (looking for patterns like A001_C001_XXXXXX.R3D)
+        file_name = os.path.basename(file_path)
+        clip_match = re.match(r'^([A-Z]\d{3}_[A-Z]\d{3}).*\.[Rr]3[Dd]$', file_name)
+        
+        if clip_match:
+            # If we have both RDC folder and clip pattern, use both for the key
+            clip_prefix = clip_match.group(1)  # e.g., A001_C001
+            return f"{rdc_folder}_{clip_prefix}"
+        else:
+            # If only RDC folder is available, use that
+            return rdc_folder
+            
+    except Exception as e:
+        print(f"Error determining RDC group key for {file_path}: {e}")
+        return None
+
+def group_r3d_files_by_rdc(r3d_files):
+    """
+    Group R3D files by their RDC folder and clip prefix.
+    Files not in RDC folders are treated individually.
+    
+    Returns:
+        A dictionary where:
+        - Keys are RDC group keys
+        - Values are lists of (file_id, file_path) tuples
+    """
+    grouped_files = {}
+    rdc_count = 0
+    non_rdc_count = 0
+    
+    # First, try to extract key identifiers for debugging
+    if r3d_files:
+        sample_file = r3d_files[0][1]
+        print(f"Sample file: {sample_file}")
+        print(f"  RDC group key: {get_rdc_group_key(sample_file)}")
+    
+    for file_id, file_path in r3d_files:
+        group_key = get_rdc_group_key(file_path)
+        
+        if group_key:
+            # This is an RDC file, group by RDC folder and clip prefix
+            if group_key not in grouped_files:
+                grouped_files[group_key] = []
+                print(f"Found new RDC group: {group_key}")
+            
+            grouped_files[group_key].append((file_id, file_path))
+            rdc_count += 1
+        else:
+            # Not in an RDC folder, use the file itself as the key
+            # Each non-RDC file gets its own group
+            file_key = f"single_{file_id}"
+            grouped_files[file_key] = [(file_id, file_path)]
+            non_rdc_count += 1
+    
+    print(f"Grouped {len(r3d_files)} files into {len(grouped_files)} groups/folders")
+    print(f"Files in RDC groups: {rdc_count}, Standalone files: {non_rdc_count}")
+    
+    # Print RDC group details
+    for group_key, files in grouped_files.items():
+        if len(files) > 1:
+            print(f"RDC group: {group_key} has {len(files)} files")
+            print(f"  First file: {os.path.basename(files[0][1])}")
+            print(f"  Last file: {os.path.basename(files[-1][1])}")
+    
+    return grouped_files
+
+def select_representative_r3d(file_group):
+    """
+    Select the most representative R3D file from a group.
+    For RDC folders, this tries to find the middle clip in the sequence.
+    """
+    if not file_group:
+        return None
+    
+    # If only one file, return it
+    if len(file_group) == 1:
+        return file_group[0]
+    
+    # Sort files by name (which generally sorts by sequence number for RED cameras)
+    sorted_files = sorted(file_group, key=lambda x: os.path.basename(x[1]))
+    
+    # Try to find files that match the pattern A???_???.R3D
+    # These are the main camera files, not proxies or other secondary files
+    main_files = []
+    for file_tuple in sorted_files:
+        file_path = file_tuple[1]
+        file_name = os.path.basename(file_path)
+        # Check if matches the typical RED naming pattern
+        if re.match(r'^[A-Za-z]\d{3}_[A-Za-z]\d{3}.*\.[Rr]3[Dd]$', file_name):
+            main_files.append(file_tuple)
+    
+    # If we found main files, use those; otherwise use all files
+    files_to_process = main_files if main_files else sorted_files
+    
+    # Return the middle file in the sequence
+    middle_index = len(files_to_process) // 2
+    return files_to_process[middle_index]
+
 def process_r3d_thumbnails(drive_filter=None, frame_number=None, width=640, height=480, limit=None, summary_interval=10, timeout=300):
     """Generate thumbnails for all R3D files in cataloged drives"""
     # Get all mounted drives
@@ -249,9 +449,11 @@ def process_r3d_thumbnails(drive_filter=None, frame_number=None, width=640, heig
     print(f"\nFound {len(drives)} mounted drives to process")
     
     # Process each drive
+    total_groups = 0
     total_files = 0
     total_processed = 0
     total_updated = 0
+    total_skipped = 0
     total_failed = 0
     
     for drive in drives:
@@ -265,72 +467,117 @@ def process_r3d_thumbnails(drive_filter=None, frame_number=None, width=640, heig
         # Find all R3D files without thumbnails
         r3d_files = find_r3d_files_without_thumbnails(drive_id, mount_point)
         
-        # Apply limit if specified
-        if limit and len(r3d_files) > limit:
-            print(f"Limiting to {limit} files (out of {len(r3d_files)} total files)")
-            r3d_files = r3d_files[:limit]
+        # Group files by RDC folder
+        grouped_files = group_r3d_files_by_rdc(r3d_files)
+        
+        # Count total files before limiting
+        original_group_count = len(grouped_files)
+        original_file_count = sum(len(files) for files in grouped_files.values())
+        
+        # Apply limit if specified (to groups, not individual files)
+        if limit and len(grouped_files) > limit:
+            print(f"Limiting to {limit} groups (out of {len(grouped_files)} total groups)")
+            # Take first N keys
+            keys_to_keep = list(grouped_files.keys())[:limit]
+            grouped_files = {k: grouped_files[k] for k in keys_to_keep}
         
         # Show file count
-        file_count = len(r3d_files)
+        group_count = len(grouped_files)
+        file_count = sum(len(files) for files in grouped_files.values())
+        total_groups += group_count
         total_files += file_count
-        print(f"Found {file_count} R3D files without thumbnails")
         
-        # Process each file
-        start_time = time.time()
+        print(f"Found {file_count} R3D files in {group_count} groups/folders")
+        print(f"Will process 1 representative file from each group (total: {group_count})")
+        
+        if group_count < original_group_count:
+            print(f"Limited from {original_group_count} to {group_count} groups")
+            print(f"Limited from {original_file_count} to {file_count} total files")
         
         # Create a thumbnail directory for this drive
         thumbnail_dir = os.path.expanduser(f"~/media-asset-tracker/thumbnails/{drive_id}")
         os.makedirs(thumbnail_dir, exist_ok=True)
         
-        for i, (file_id, file_path) in enumerate(r3d_files, 1):
-            file_basename = os.path.basename(file_path)
+        # Process each group
+        start_time = time.time()
+        group_num = 0
+        
+        for group_key, file_group in grouped_files.items():
+            group_num += 1
+            
+            # Select representative file
+            representative = select_representative_r3d(file_group)
+            if not representative:
+                print(f"[{group_num}/{group_count}] No files to process in group {group_key}")
+                continue
+                
+            file_id, file_path = representative
+            
+            # Get relative path for display
             rel_path = os.path.relpath(file_path, mount_point)
+            is_rdc = len(file_group) > 1  # If more than one file, it's an RDC group
             
             # Show progress
-            if i % summary_interval == 0 or i == 1 or i == file_count:
+            if group_num % summary_interval == 0 or group_num == 1 or group_num == group_count:
                 elapsed_time = time.time() - start_time
-                files_per_second = i / elapsed_time if elapsed_time > 0 else 0
-                eta_seconds = (file_count - i) / files_per_second if files_per_second > 0 else 0
+                groups_per_second = group_num / elapsed_time if elapsed_time > 0 else 0
+                eta_seconds = (group_count - group_num) / groups_per_second if groups_per_second > 0 else 0
                 eta_str = time.strftime("%H:%M:%S", time.gmtime(eta_seconds))
                 
-                print(f"\nProgress: {i}/{file_count} ({i/file_count*100:.1f}%) | {files_per_second:.2f} files/sec | ETA: {eta_str}")
+                print(f"\nProgress: {group_num}/{group_count} ({group_num/group_count*100:.1f}%) | {groups_per_second:.2f} groups/sec | ETA: {eta_str}")
             
-            print(f"[{i}/{file_count}] Processing: {rel_path}", end=" ", flush=True)
+            group_type = "RDC group" if is_rdc else "file"
+            file_count_in_group = len(file_group)
             
-            # Extract thumbnail
+            print(f"[{group_num}/{group_count}] Processing {group_type}: {rel_path}", end=" ", flush=True)
+            if file_count_in_group > 1:
+                print(f"({file_count_in_group} files in group)", end=" ", flush=True)
+            
+            # Extract thumbnail from representative file
             thumbnail_path = None
             try:
                 thumbnail_path = extract_single_frame(file_path, thumbnail_dir, frame_number, width, height, timeout)
                 
                 if thumbnail_path:
-                    # Update database with thumbnail path
-                    updated = update_thumbnail_path(file_id, thumbnail_path)
-                    if updated:
+                    # Get all file IDs in this group
+                    all_file_ids = [f[0] for f in file_group]
+                    
+                    # For clarity in log messages
+                    if len(all_file_ids) > 1:
+                        print(f"RDC folder found with {len(all_file_ids)} files - will apply same thumbnail to all")
+                    
+                    # Update all files in the group with the same thumbnail
+                    updated = update_thumbnails_for_rdc_group(all_file_ids, thumbnail_path)
+                    
+                    if updated > 0:
                         total_processed += 1
-                        total_updated += 1
-                        print("✓")
+                        total_updated += updated
+                        print(f"✓ (updated {updated}/{file_count_in_group} files)")
                     else:
                         print("✓ (generated thumbnail but database update failed)")
                         total_processed += 1
-                        total_failed += 1
+                        total_failed += file_count_in_group
                 else:
                     print("✗ (thumbnail extraction failed)")
-                    total_failed += 1
+                    total_failed += file_count_in_group
             except Exception as e:
                 print(f"✗ (error: {e})")
-                total_failed += 1
+                total_failed += file_count_in_group
     
     # Print summary
     print("\n=== THUMBNAIL PROCESSING SUMMARY ===")
     print(f"Total drives processed: {len(drives)}")
-    print(f"Total R3D files found: {total_files}")
-    print(f"Successfully processed: {total_processed}")
-    print(f"Database entries updated: {total_updated}")
+    print(f"Total R3D groups/folders found: {total_groups}")
+    print(f"Total R3D files in groups: {total_files}")
+    print(f"Successfully processed groups: {total_processed}")
+    print(f"Total files updated with thumbnails: {total_updated}")
     print(f"Failed: {total_failed}")
     
     if total_processed > 0:
-        success_rate = (total_processed / total_files) * 100 if total_files > 0 else 0
-        print(f"Success rate: {success_rate:.1f}%")
+        success_rate = (total_processed / total_groups) * 100 if total_groups > 0 else 0
+        file_update_rate = (total_updated / total_files) * 100 if total_files > 0 else 0
+        print(f"Group success rate: {success_rate:.1f}%")
+        print(f"File update rate: {file_update_rate:.1f}%")
     
     print(f"Thumbnails saved to: ~/media-asset-tracker/thumbnails/")
 
@@ -367,14 +614,14 @@ def main():
     parser.add_argument(
         "-l", "--limit",
         type=int,
-        help="Limit number of files to process per drive"
+        help="Limit number of groups to process per drive"
     )
     
     parser.add_argument(
         "-s", "--summary-interval",
         type=int,
         default=10,
-        help="Show detailed progress every N files (default: 10)"
+        help="Show detailed progress every N groups (default: 10)"
     )
     
     parser.add_argument(
