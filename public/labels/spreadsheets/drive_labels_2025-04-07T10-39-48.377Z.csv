@@ -1,0 +1,6 @@
+Drive_ID,Drive_Name,Root_Folders,Media_Stats,Date_Added,QR_Code_Data,Label_Text
+"drive1","HDD Drive 1","No folders","","4/7/2025","{"type":"drive","id":"drive1","uuid":"","name":"HDD Drive 1"}","HDD Drive 1\nID: drive1\nNo folders\n\nAdded: 4/7/2025"
+"drive2","SSD Drive 2","No folders","","4/7/2025","{"type":"drive","id":"drive2","uuid":"","name":"SSD Drive 2"}","SSD Drive 2\nID: drive2\nNo folders\n\nAdded: 4/7/2025"
+"drive3","HDD Drive 3","No folders","","4/7/2025","{"type":"drive","id":"drive3","uuid":"","name":"HDD Drive 3"}","HDD Drive 3\nID: drive3\nNo folders\n\nAdded: 4/7/2025"
+"drive4","NVMe Drive 4","No folders","","4/7/2025","{"type":"drive","id":"drive4","uuid":"","name":"NVMe Drive 4"}","NVMe Drive 4\nID: drive4\nNo folders\n\nAdded: 4/7/2025"
+"drive5","RAID Drive 5","No folders","","4/7/2025","{"type":"drive","id":"drive5","uuid":"","name":"RAID Drive 5"}","RAID Drive 5\nID: drive5\nNo folders\n\nAdded: 4/7/2025"

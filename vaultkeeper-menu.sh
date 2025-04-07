@@ -464,9 +464,26 @@ batch_catalog_drives() {
   
   if [ $PARALLEL -eq 1 ]; then
     # Parallel processing (2 drives at a time)
-    i=0
-    while [ $i -lt ${#MOUNTED_DRIVES[@]} ]; do
-      # Process first drive
+    # For true parallel processing, we'll launch all processes at once
+    # and use a separate loop to monitor them
+    
+    echo "Starting parallel processing of drives..."
+    
+    # Start a progress status file to track overall completion
+    echo "0" > "$LOG_DIR/total_completed"
+    total_drives=${#MOUNTED_DRIVES[@]}
+    echo "$total_drives" > "$LOG_DIR/total_drives"
+    
+    # Array to store all PIDs
+    declare -a CATALOG_PIDS=()
+    declare -a MONITOR_PIDS=()
+    
+    # Track which drives are being processed in which slot
+    declare -a PROCESSING_SLOTS=()
+    
+    # First, start all processes simultaneously (2 at a time)
+    for i in "${!MOUNTED_DRIVES[@]}"; do
+      # Process current drive
       mount_point="${MOUNTED_DRIVES[$i]}"
       label="${CUSTOM_LABELS[$i]}"
       
@@ -481,93 +498,84 @@ batch_catalog_drives() {
       echo -e "${GREEN}==================================================${NC}"
       
       # Create log file
-      LOG_FILE_1="$LOG_DIR/drive_$(echo "$mount_point" | tr '/' '_').log"
+      LOG_FILE="$LOG_DIR/drive_$(echo "$mount_point" | tr '/' '_').log"
       
       # Start catalog in background
-      echo "Starting cataloging in background..."
-      echo "Logging output to: $LOG_FILE_1"
+      echo "Launching cataloging process in background..."
+      echo "Logging output to: $LOG_FILE"
       
       if [ $ENABLE_TRANSCRIPTION -eq 1 ]; then
-        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t $BATCH_FLAGS > "$LOG_FILE_1" 2>&1) &
+        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t $BATCH_FLAGS > "$LOG_FILE" 2>&1) &
       else
-        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" $BATCH_FLAGS > "$LOG_FILE_1" 2>&1) &
+        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" $BATCH_FLAGS > "$LOG_FILE" 2>&1) &
       fi
-      CATALOG_PID_1=$!
+      CATALOG_PID=$!
+      CATALOG_PIDS+=($CATALOG_PID)
       
-      # Check if we have a second drive to process
-      j=$((i+1))
-      if [ $j -lt ${#MOUNTED_DRIVES[@]} ]; then
-        mount_point2="${MOUNTED_DRIVES[$j]}"
-        label2="${CUSTOM_LABELS[$j]}"
+      # Store the drive being processed in this slot
+      PROCESSING_SLOTS+=($i)
+      
+      # Create a progress monitoring loop for this drive
+      (
+        drive_num=$((i+1))
+        drive_label="$label"
+        drive_log="$LOG_FILE"
+        catalog_pid=$CATALOG_PID
         
+        echo -e "${BLUE}Started monitoring for Drive #${drive_num} ($drive_label)${NC}"
+        
+        while true; do
+          if [ -f "$drive_log" ]; then
+            # Extract the latest progress information
+            PROGRESS=$(tail -n 100 "$drive_log" | grep -E "Progress:|Processing directory:|Processed [0-9]+ R3D files|Generated thumbnail for:|Extracted media info for:" | tail -n 1)
+            if [ ! -z "$PROGRESS" ]; then
+              echo -e "${BLUE}Drive #${drive_num} ($drive_label):${NC} $PROGRESS"
+            fi
+          fi
+          
+          # Check if the process is still running
+          if ! kill -0 $catalog_pid 2>/dev/null; then
+            echo -e "${GREEN}Drive #${drive_num} ($drive_label) process completed${NC}"
+            
+            # Update completion counter
+            completed=$(cat "$LOG_DIR/total_completed")
+            completed=$((completed + 1))
+            echo "$completed" > "$LOG_DIR/total_completed"
+            
+            # Calculate and display overall progress
+            total=$(cat "$LOG_DIR/total_drives")
+            percent=$((completed * 100 / total))
+            echo -e "${YELLOW}Overall progress: ${completed}/${total} drives completed (${percent}%)${NC}"
+            
+            break
+          fi
+          
+          sleep 5
+        done
+      ) &
+      MONITOR_PID=$!
+      MONITOR_PIDS+=($MONITOR_PID)
+      
+      # If we've started 2 processes or this is the last drive, 
+      # wait until one finishes before starting more
+      if [ $(( (i+1) % 2 )) -eq 0 ] || [ $i -eq $((${#MOUNTED_DRIVES[@]} - 1)) ]; then
+        echo "Maximum concurrent processes reached (or all drives started)"
+        echo "Letting processing continue in background..."
         echo
-        echo -e "${GREEN}==================================================${NC}"
-        echo -e "${BLUE}CATALOGING Drive #$((j+1)): $mount_point2 (Label: $label2)${NC}"
-        if [ $ENABLE_TRANSCRIPTION -eq 1 ]; then
-          echo -e "${BLUE}Transcription: ENABLED${NC}"
-        else
-          echo -e "${BLUE}Transcription: DISABLED${NC}"
-        fi
-        echo -e "${GREEN}==================================================${NC}"
-        
-        # Create second log file
-        LOG_FILE_2="$LOG_DIR/drive_$(echo "$mount_point2" | tr '/' '_').log"
-        
-        # Start second catalog in background
-        echo "Starting cataloging in background..."
-        echo "Logging output to: $LOG_FILE_2"
-        
-        if [ $ENABLE_TRANSCRIPTION -eq 1 ]; then
-          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" -t $BATCH_FLAGS > "$LOG_FILE_2" 2>&1) &
-        else
-          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" $BATCH_FLAGS > "$LOG_FILE_2" 2>&1) &
-        fi
-        CATALOG_PID_2=$!
-        
-        # Wait for both catalog processes to complete
-        echo "Waiting for both catalog processes to complete..."
-        wait $CATALOG_PID_1
-        echo "Catalog for Drive #$((i+1)) completed"
-        wait $CATALOG_PID_2
-        echo "Catalog for Drive #$((j+1)) completed"
-        
-        # Show logs
-        echo "Catalog log for Drive #$((i+1)):"
-        if [ -f "$LOG_FILE_1" ]; then
-          cat "$LOG_FILE_1"
-        else
-          echo "Log file not found"
-        fi
-        
-        echo "Catalog log for Drive #$((j+1)):"
-        if [ -f "$LOG_FILE_2" ]; then
-          cat "$LOG_FILE_2"
-        else
-          echo "Log file not found"
-        fi
-        
-        # Clean up log files
-        rm -f "$LOG_FILE_1" "$LOG_FILE_2"
-        
-        # Increment by 2 since we processed 2 drives
-        i=$((i+2))
-      else
-        # Only one drive left, process it normally
-        wait $CATALOG_PID_1
-        echo "Catalog log for Drive #$((i+1)):"
-        if [ -f "$LOG_FILE_1" ]; then
-          cat "$LOG_FILE_1"
-        else
-          echo "Log file not found"
-        fi
-        
-        # Clean up log file
-        rm -f "$LOG_FILE_1"
-        
-        # Increment counter
-        i=$((i+1))
       fi
     done
+    
+    # Wait for all catalog processes to complete
+    echo
+    echo -e "${YELLOW}All drives are being processed in parallel.${NC}"
+    echo -e "${YELLOW}Progress updates are displayed above. You can safely continue using the menu.${NC}"
+    echo -e "${YELLOW}When all drives complete, a summary will be shown.${NC}"
+    
+    # Don't wait here - this is a walkaway process
+    # We'll let the monitoring processes handle the updates
+    echo
+    echo -e "${GREEN}Returning to main menu. Processing continues in background.${NC}"
+    
   else
     # Serial processing for cataloging
     for i in "${!MOUNTED_DRIVES[@]}"; do
@@ -1011,17 +1019,48 @@ full_process() {
   fi
   echo -e "${GREEN}=====================================================${NC}"
   echo
-  echo "Starting walkaway cataloging process..."
-  echo
   
   # Build the batch flag for duplicate handling
   BATCH_FLAGS="--batch-mode --duplicate-choice $DUPLICATES_CHOICE"
   
   if [ $PARALLEL -eq 1 ]; then
     # Parallel processing (2 drives at a time)
-    i=0
-    while [ $i -lt ${#MOUNTED_DRIVES[@]} ]; do
-      # Process first drive
+    # For true parallel processing, we'll launch all processes at once
+    # and use a separate loop to monitor them
+    
+    echo "Starting parallel processing of drives..."
+    
+    # Start a progress status file to track overall completion
+    echo "0" > "$LOG_DIR/total_completed"
+    total_drives=${#MOUNTED_DRIVES[@]}
+    echo "$total_drives" > "$LOG_DIR/total_drives"
+    
+    # Array to store all PIDs
+    declare -a CATALOG_PIDS=()
+    declare -a MONITOR_PIDS=()
+    
+    # First, start all processes simultaneously (2 at a time)
+    for i in "${!MOUNTED_DRIVES[@]}"; do
+      # Process in pairs, limiting to 2 at a time
+      if [ $((i % 2)) -eq 0 ]; then
+        # If we have two or more running already, wait for one to finish
+        if [ ${#CATALOG_PIDS[@]} -ge 2 ]; then
+          echo "Maximum of 2 processes already running, waiting for one to complete..."
+          wait -n ${CATALOG_PIDS[@]}
+          
+          # Remove the finished PID from our array (this is complicated in bash)
+          # We'll simply rebuild the array with running processes
+          NEW_PIDS=()
+          for pid in "${CATALOG_PIDS[@]}"; do
+            if kill -0 $pid 2>/dev/null; then
+              NEW_PIDS+=($pid)
+            fi
+          done
+          CATALOG_PIDS=("${NEW_PIDS[@]}")
+        fi
+      fi
+      
+      # Process current drive
       mount_point="${MOUNTED_DRIVES[$i]}"
       label="${CUSTOM_LABELS[$i]}"
       do_transcribe=${TRANSCRIBE_ARRAY[$i]}
@@ -1037,94 +1076,88 @@ full_process() {
       echo -e "${GREEN}==================================================${NC}"
       
       # Create log file
-      LOG_FILE_1="$LOG_DIR/drive_$(echo "$mount_point" | tr '/' '_').log"
+      LOG_FILE="$LOG_DIR/drive_$(echo "$mount_point" | tr '/' '_').log"
       
       # Start catalog in background
-      echo "Starting cataloging in background..."
-      echo "Logging output to: $LOG_FILE_1"
+      echo "Launching cataloging process in background..."
+      echo "Logging output to: $LOG_FILE"
       
       if [ $do_transcribe -eq 1 ]; then
-        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t $BATCH_FLAGS > "$LOG_FILE_1" 2>&1) &
+        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" -t $BATCH_FLAGS > "$LOG_FILE" 2>&1) &
       else
-        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" $BATCH_FLAGS > "$LOG_FILE_1" 2>&1) &
+        (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point" -l "$label" $BATCH_FLAGS > "$LOG_FILE" 2>&1) &
       fi
-      CATALOG_PID_1=$!
+      CATALOG_PID=$!
+      CATALOG_PIDS+=($CATALOG_PID)
       
-      # Check if we have a second drive to process
-      j=$((i+1))
-      if [ $j -lt ${#MOUNTED_DRIVES[@]} ]; then
-        mount_point2="${MOUNTED_DRIVES[$j]}"
-        label2="${CUSTOM_LABELS[$j]}"
-        do_transcribe2=${TRANSCRIBE_ARRAY[$j]}
+      # Create a progress monitoring loop for this drive
+      (
+        drive_num=$((i+1))
+        drive_label="$label"
+        drive_log="$LOG_FILE"
+        catalog_pid=$CATALOG_PID
         
-        echo
-        echo -e "${GREEN}==================================================${NC}"
-        echo -e "${BLUE}CATALOGING Drive #$((j+1)): $mount_point2 (Label: $label2)${NC}"
-        if [ $do_transcribe2 -eq 1 ]; then
-          echo -e "${BLUE}Transcription: ENABLED${NC}"
-        else
-          echo -e "${BLUE}Transcription: DISABLED${NC}"
-        fi
-        echo -e "${GREEN}==================================================${NC}"
+        echo -e "${BLUE}Started monitoring for Drive #${drive_num} ($drive_label)${NC}"
         
-        # Create second log file
-        LOG_FILE_2="$LOG_DIR/drive_$(echo "$mount_point2" | tr '/' '_').log"
-        
-        # Start second catalog in background
-        echo "Starting cataloging in background..."
-        echo "Logging output to: $LOG_FILE_2"
-        
-        if [ $do_transcribe2 -eq 1 ]; then
-          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" -t $BATCH_FLAGS > "$LOG_FILE_2" 2>&1) &
-        else
-          (python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" catalog "$mount_point2" -l "$label2" $BATCH_FLAGS > "$LOG_FILE_2" 2>&1) &
-        fi
-        CATALOG_PID_2=$!
-        
-        # Wait for both catalog processes to complete
-        echo "Waiting for both catalog processes to complete..."
-        wait $CATALOG_PID_1
-        echo "Catalog for Drive #$((i+1)) completed"
-        wait $CATALOG_PID_2
-        echo "Catalog for Drive #$((j+1)) completed"
-        
-        # Show logs
-        echo "Catalog log for Drive #$((i+1)):"
-        if [ -f "$LOG_FILE_1" ]; then
-          cat "$LOG_FILE_1"
-        else
-          echo "Log file not found"
-        fi
-        
-        echo "Catalog log for Drive #$((j+1)):"
-        if [ -f "$LOG_FILE_2" ]; then
-          cat "$LOG_FILE_2"
-        else
-          echo "Log file not found"
-        fi
-        
-        # Clean up log files
-        rm -f "$LOG_FILE_1" "$LOG_FILE_2"
-        
-        # Increment by 2 since we processed 2 drives
-        i=$((i+2))
-      else
-        # Only one drive left, process it normally
-        wait $CATALOG_PID_1
-        echo "Catalog log for Drive #$((i+1)):"
-        if [ -f "$LOG_FILE_1" ]; then
-          cat "$LOG_FILE_1"
-        else
-          echo "Log file not found"
-        fi
-        
-        # Clean up log file
-        rm -f "$LOG_FILE_1"
-        
-        # Increment counter
-        i=$((i+1))
-      fi
+        while true; do
+          if [ -f "$drive_log" ]; then
+            # Extract the latest progress information
+            PROGRESS=$(tail -n 100 "$drive_log" | grep -E "Progress:|Processing directory:|Processed [0-9]+ R3D files|Generated thumbnail for:|Extracted media info for:" | tail -n 1)
+            if [ ! -z "$PROGRESS" ]; then
+              echo -e "${BLUE}Drive #${drive_num} ($drive_label):${NC} $PROGRESS"
+            fi
+          fi
+          
+          # Check if the process is still running
+          if ! kill -0 $catalog_pid 2>/dev/null; then
+            echo -e "${GREEN}Drive #${drive_num} ($drive_label) process completed${NC}"
+            
+            # Update completion counter
+            completed=$(cat "$LOG_DIR/total_completed")
+            completed=$((completed + 1))
+            echo "$completed" > "$LOG_DIR/total_completed"
+            
+            # Calculate and display overall progress
+            total=$(cat "$LOG_DIR/total_drives")
+            percent=$((completed * 100 / total))
+            echo -e "${YELLOW}Overall progress: ${completed}/${total} drives completed (${percent}%)${NC}"
+            
+            break
+          fi
+          
+          sleep 5
+        done
+      ) &
+      MONITOR_PID=$!
+      MONITOR_PIDS+=($MONITOR_PID)
     done
+    
+    # Wait for all catalog processes to complete
+    echo
+    echo -e "${YELLOW}All drives are being processed in parallel with a max of 2 concurrent processes.${NC}"
+    echo -e "${YELLOW}Progress updates are displayed above. You can continue using the menu.${NC}"
+    echo -e "${YELLOW}When all drives complete, a summary will be shown.${NC}"
+    
+    # Create a simple completion check that doesn't block the terminal
+    (
+      # Wait for all catalog processes to finish
+      for pid in "${CATALOG_PIDS[@]}"; do
+        wait $pid
+      done
+      
+      # All done!
+      echo -e "\n${GREEN}===============================================${NC}"
+      echo -e "${GREEN}Full process complete! All drives processed.${NC}"
+      echo -e "${GREEN}===============================================${NC}"
+      
+      # Clean up monitor processes
+      for pid in "${MONITOR_PIDS[@]}"; do
+        kill $pid 2>/dev/null || true
+      done
+    ) &
+    
+    echo
+    echo -e "${GREEN}Returning to main menu. Processing continues in background.${NC}"
     
   else
     # Serial processing for cataloging
@@ -1253,10 +1286,11 @@ process_transcriptions() {
   # Build command
   if [ -z "$drive_id" ]; then
     echo "Processing all pending transcriptions with $model model using $workers workers..."
-    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" transcribe -m "$model" -w "$workers" > "$LOG_FILE" 2>&1
+    # Use tee to display output in the console and save to log file
+    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" transcribe -m "$model" -w "$workers" 2>&1 | tee "$LOG_FILE"
   else
     echo "Processing transcriptions for drive $drive_id with $model model using $workers workers..."
-    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" transcribe -d "$drive_id" -m "$model" -w "$workers" > "$LOG_FILE" 2>&1
+    python "$SCRIPT_DIR/scripts/utils/asset-tracker.py" transcribe -d "$drive_id" -m "$model" -w "$workers" 2>&1 | tee "$LOG_FILE"
   fi
   
   echo

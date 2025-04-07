@@ -58,6 +58,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // Load data for other pages
         loadDrivesList();
         loadProjectsList();
+        loadLocationsData();
         loadReportsData();
     }
     
@@ -430,20 +431,28 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             });
             
-            const qrButton = document.createElement('button');
-            qrButton.className = 'button';
-            qrButton.textContent = 'QR Code';
-            qrButton.addEventListener('click', () => {
+            const exportLabelButton = document.createElement('button');
+            exportLabelButton.className = 'button';
+            exportLabelButton.textContent = 'Export Label';
+            exportLabelButton.addEventListener('click', () => {
+                console.log('Export Label button clicked, drive:', drive);
                 if (USE_BACKEND) {
-                    window.open(`${API_BASE_URL}/api/drives/${drive.id}/qr-code`, '_blank');
+                    // Determine the correct ID to use (could be id, _id, or driveId)
+                    const driveId = drive._id || drive.id || drive.driveId;
+                    console.log('Using drive ID:', driveId);
+                    
+                    // Try the drives endpoint first
+                    const url = `${API_BASE_URL}/api/drives/${driveId}/export-label`;
+                    console.log('Opening URL:', url);
+                    window.open(url, '_blank');
                 } else {
-                    alert(`QR Code for Drive: ${drive.label || drive.volumeName || drive.id}`);
+                    alert(`Export Label for Drive: ${drive.label || drive.volumeName || drive.id}`);
                 }
             });
             
             actionsCell.appendChild(foldersButton);
             actionsCell.appendChild(document.createTextNode(' '));
-            actionsCell.appendChild(qrButton);
+            actionsCell.appendChild(exportLabelButton);
             
             row.appendChild(labelCell);
             row.appendChild(volumeNameCell);
@@ -1996,6 +2005,1428 @@ document.addEventListener('DOMContentLoaded', function() {
         ];
         
         displayFileTypesChart(mockFileTypes);
+    }
+    
+    // LOCATIONS FUNCTIONALITY
+    
+    // Load locations data and populate UI components
+    async function loadLocationsData() {
+        try {
+            // Load location summary for summary section
+            loadLocationsSummary();
+            
+            // Load unique bays for bay filter dropdown
+            loadLocationBays();
+            
+            // Set up event listeners for the locations page
+            setupLocationsEventListeners();
+        } catch (error) {
+            console.error('Error loading locations data:', error);
+        }
+    }
+    
+    // Set up event listeners for locations page
+    function setupLocationsEventListeners() {
+        // Create location button
+        const createLocationButton = document.getElementById('create-location-button');
+        if (createLocationButton) {
+            createLocationButton.addEventListener('click', createNewLocation);
+        }
+        
+        // Create batch locations button
+        const createBatchButton = document.getElementById('create-batch-locations-button');
+        if (createBatchButton) {
+            createBatchButton.addEventListener('click', createBatchLocations);
+        }
+        
+        // Load locations button
+        const loadLocationsButton = document.getElementById('load-locations-button');
+        if (loadLocationsButton) {
+            loadLocationsButton.addEventListener('click', loadFilteredLocations);
+        }
+        
+        // Bay filter dropdown - when changed, update shelf dropdown
+        const bayFilter = document.getElementById('location-bay-filter');
+        if (bayFilter) {
+            bayFilter.addEventListener('change', (e) => {
+                if (e.target.value) {
+                    loadLocationShelves(parseInt(e.target.value));
+                    
+                    // Also update the visual layout
+                    renderBayVisualization(parseInt(e.target.value));
+                } else {
+                    // Reset shelf filter
+                    const shelfFilter = document.getElementById('location-shelf-filter');
+                    if (shelfFilter) {
+                        shelfFilter.innerHTML = '<option value="">All Shelves</option>';
+                    }
+                    
+                    // Reset visualization
+                    const visualization = document.getElementById('bay-shelf-visualization');
+                    if (visualization) {
+                        visualization.innerHTML = '<p>Select a bay to view visual layout</p>';
+                    }
+                }
+            });
+        }
+    }
+    
+    // Create a new location
+    async function createNewLocation() {
+        const bay = document.getElementById('new-location-bay').value;
+        const shelf = document.getElementById('new-location-shelf').value;
+        const position = document.getElementById('new-location-position').value;
+        const section = document.getElementById('new-location-section').value;
+        
+        if (!bay || !shelf || !position) {
+            alert('Bay, shelf, and position are required');
+            return;
+        }
+        
+        try {
+            if (USE_BACKEND) {
+                console.log('Creating location via API...');
+                const response = await fetch(`${API_BASE_URL}/api/locations`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        bay: parseInt(bay),
+                        shelf: parseInt(shelf),
+                        position: parseInt(position),
+                        section: section || undefined
+                    }),
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Failed to create location');
+                }
+                
+                const newLocation = await response.json();
+                console.log('Location created:', newLocation);
+                
+                // Clear the inputs
+                document.getElementById('new-location-bay').value = '';
+                document.getElementById('new-location-shelf').value = '';
+                document.getElementById('new-location-position').value = '';
+                document.getElementById('new-location-section').value = '';
+                
+                // Refresh data
+                loadLocationsSummary();
+                loadLocationBays();
+                
+                // Show success message
+                alert(`Location ${newLocation.locationId} created successfully`);
+                
+                // If filters match the new location, refresh the locations list
+                const bayFilter = document.getElementById('location-bay-filter').value;
+                const shelfFilter = document.getElementById('location-shelf-filter').value;
+                
+                if ((!bayFilter || bayFilter == bay) && (!shelfFilter || shelfFilter == shelf)) {
+                    loadFilteredLocations();
+                }
+                
+                // Update visualization if the bay matches
+                if ((!bayFilter || bayFilter == bay)) {
+                    renderBayVisualization(parseInt(bay));
+                }
+            } else {
+                // Mock create location
+                alert(`Mock: Created location B${bay}-S${shelf}-P${position}`);
+                
+                // Clear inputs
+                document.getElementById('new-location-bay').value = '';
+                document.getElementById('new-location-shelf').value = '';
+                document.getElementById('new-location-position').value = '';
+                document.getElementById('new-location-section').value = '';
+                
+                // Update with mock data
+                loadMockLocationsSummary();
+                populateMockLocationBays();
+            }
+        } catch (error) {
+            console.error('Error creating location:', error);
+            alert('Failed to create location: ' + error.message);
+        }
+    }
+    
+    // Create batch locations
+    async function createBatchLocations() {
+        const bay = document.getElementById('batch-bay').value;
+        const shelf = document.getElementById('batch-shelf').value;
+        const positions = document.getElementById('batch-positions').value;
+        const section = document.getElementById('batch-section').value;
+        
+        if (!bay || !shelf || !positions) {
+            alert('Bay, shelf, and number of positions are required');
+            return;
+        }
+        
+        const numPositions = parseInt(positions);
+        if (numPositions <= 0 || numPositions > 50) {
+            alert('Number of positions must be between 1 and 50');
+            return;
+        }
+        
+        try {
+            if (USE_BACKEND) {
+                console.log('Creating batch locations via API...');
+                
+                // Create array of location objects
+                const locations = [];
+                for (let pos = 1; pos <= numPositions; pos++) {
+                    locations.push({
+                        bay: parseInt(bay),
+                        shelf: parseInt(shelf),
+                        position: pos,
+                        section: section || undefined,
+                        status: 'EMPTY'
+                    });
+                }
+                
+                const response = await fetch(`${API_BASE_URL}/api/locations/batch`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ locations }),
+                });
+                
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Failed to create batch locations');
+                }
+                
+                const result = await response.json();
+                console.log('Batch locations created:', result);
+                
+                // Clear the inputs
+                document.getElementById('batch-bay').value = '';
+                document.getElementById('batch-shelf').value = '';
+                document.getElementById('batch-section').value = '';
+                
+                // Refresh data
+                loadLocationsSummary();
+                loadLocationBays();
+                
+                // Show success message
+                alert(`Created ${result.created.length} locations successfully`);
+                
+                // If filters match the new locations, refresh the locations list
+                const bayFilter = document.getElementById('location-bay-filter').value;
+                const shelfFilter = document.getElementById('location-shelf-filter').value;
+                
+                if ((!bayFilter || bayFilter == bay) && (!shelfFilter || shelfFilter == shelf)) {
+                    loadFilteredLocations();
+                }
+                
+                // Update visualization if the bay matches
+                if ((!bayFilter || bayFilter == bay)) {
+                    renderBayVisualization(parseInt(bay));
+                }
+            } else {
+                // Mock create batch locations
+                alert(`Mock: Created ${numPositions} locations in Bay ${bay}, Shelf ${shelf}`);
+                
+                // Clear inputs
+                document.getElementById('batch-bay').value = '';
+                document.getElementById('batch-shelf').value = '';
+                document.getElementById('batch-section').value = '';
+                
+                // Update with mock data
+                loadMockLocationsSummary();
+                populateMockLocationBays();
+            }
+        } catch (error) {
+            console.error('Error creating batch locations:', error);
+            alert('Failed to create batch locations: ' + error.message);
+        }
+    }
+    
+    // Load filtered locations based on user selections
+    async function loadFilteredLocations() {
+        const bay = document.getElementById('location-bay-filter').value;
+        const shelf = document.getElementById('location-shelf-filter').value;
+        const status = document.getElementById('location-status-filter').value;
+        
+        try {
+            const locationsList = document.getElementById('locations-list');
+            if (!locationsList) return;
+            
+            // Show loading indicator
+            locationsList.innerHTML = '<tr><td colspan="6">Loading locations...</td></tr>';
+            
+            if (USE_BACKEND) {
+                console.log('Fetching locations from API...');
+                
+                // Build query parameters
+                const params = new URLSearchParams();
+                if (bay) params.append('bay', bay);
+                if (shelf) params.append('shelf', shelf);
+                if (status) params.append('status', status);
+                
+                const url = `${API_BASE_URL}/api/locations${params.toString() ? '?' + params.toString() : ''}`;
+                const response = await fetch(url);
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch locations');
+                }
+                
+                const locations = await response.json();
+                console.log('Received locations:', locations);
+                
+                // Populate the table
+                populateLocationsTable(locations);
+                
+                // Update visualization if bay is selected
+                if (bay) {
+                    renderBayVisualization(parseInt(bay));
+                }
+            } else {
+                // Generate mock locations data
+                console.log('Generating mock locations data...');
+                const mockLocations = generateMockLocations(bay, shelf, status);
+                
+                // Populate the table with mock data
+                populateLocationsTable(mockLocations);
+                
+                // Update visualization with mock data
+                if (bay) {
+                    renderMockBayVisualization(parseInt(bay), shelf ? parseInt(shelf) : null);
+                }
+            }
+        } catch (error) {
+            console.error('Error loading locations:', error);
+            const locationsList = document.getElementById('locations-list');
+            if (locationsList) {
+                locationsList.innerHTML = '<tr><td colspan="6">Error loading locations</td></tr>';
+            }
+        }
+    }
+    
+    // Populate locations table with data
+    function populateLocationsTable(locations) {
+        const locationsList = document.getElementById('locations-list');
+        if (!locationsList) return;
+        
+        // Clear existing content
+        locationsList.innerHTML = '';
+        
+        if (locations.length === 0) {
+            locationsList.innerHTML = '<tr><td colspan="6">No locations found matching the criteria</td></tr>';
+            return;
+        }
+        
+        // Add a row for each location
+        locations.forEach(location => {
+            const row = document.createElement('tr');
+            
+            // Determine CSS class based on status
+            if (location.status === 'OCCUPIED') {
+                row.classList.add('occupied-location');
+            } else if (location.status === 'RESERVED') {
+                row.classList.add('reserved-location');
+            } else if (location.status === 'MAINTENANCE') {
+                row.classList.add('maintenance-location');
+            }
+            
+            // Location ID cell
+            const idCell = document.createElement('td');
+            idCell.textContent = location.locationId || `B${location.bay}-S${location.shelf}-P${location.position}`;
+            
+            // Status cell
+            const statusCell = document.createElement('td');
+            
+            // Create status dropdown for changing status
+            const statusSelect = document.createElement('select');
+            statusSelect.className = 'location-status-select';
+            statusSelect.dataset.locationId = location._id;
+            
+            const statusOptions = ['EMPTY', 'OCCUPIED', 'RESERVED', 'MAINTENANCE'];
+            statusOptions.forEach(opt => {
+                const option = document.createElement('option');
+                option.value = opt;
+                option.textContent = opt;
+                option.selected = location.status === opt;
+                statusSelect.appendChild(option);
+            });
+            
+            // Add event listener to update status
+            statusSelect.addEventListener('change', async (e) => {
+                const newStatus = e.target.value;
+                const locationId = e.target.dataset.locationId;
+                
+                try {
+                    if (USE_BACKEND) {
+                        const response = await fetch(`${API_BASE_URL}/api/locations/${locationId}`, {
+                            method: 'PUT',
+                            headers: {
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify({ status: newStatus }),
+                        });
+                        
+                        if (!response.ok) {
+                            throw new Error('Failed to update location status');
+                        }
+                        
+                        // Refresh data to reflect changes
+                        loadLocationsSummary();
+                        
+                        // Update the row class
+                        if (newStatus === 'OCCUPIED') {
+                            row.className = 'occupied-location';
+                        } else if (newStatus === 'RESERVED') {
+                            row.className = 'reserved-location';
+                        } else if (newStatus === 'MAINTENANCE') {
+                            row.className = 'maintenance-location';
+                        } else {
+                            row.className = '';
+                        }
+                    } else {
+                        // Update UI for mock mode
+                        if (newStatus === 'OCCUPIED') {
+                            row.className = 'occupied-location';
+                        } else if (newStatus === 'RESERVED') {
+                            row.className = 'reserved-location';
+                        } else if (newStatus === 'MAINTENANCE') {
+                            row.className = 'maintenance-location';
+                        } else {
+                            row.className = '';
+                        }
+                    }
+                } catch (error) {
+                    console.error('Error updating location status:', error);
+                    alert('Failed to update location status: ' + error.message);
+                    
+                    // Reset to previous value on error
+                    e.target.value = location.status;
+                }
+            });
+            
+            statusCell.appendChild(statusSelect);
+            
+            // Occupied By cell
+            const occupiedByCell = document.createElement('td');
+            
+            if (location.occupiedBy) {
+                // Fetch drive details if available
+                if (USE_BACKEND) {
+                    fetch(`${API_BASE_URL}/api/drives/${location.occupiedBy}`)
+                        .then(response => response.ok ? response.json() : Promise.reject('Drive not found'))
+                        .then(drive => {
+                            occupiedByCell.textContent = drive.label || drive.volumeName || drive.driveId || location.occupiedBy;
+                        })
+                        .catch(err => {
+                            console.error('Error fetching drive:', err);
+                            occupiedByCell.textContent = location.occupiedBy;
+                        });
+                } else {
+                    occupiedByCell.textContent = `Drive ${location.occupiedBy}`;
+                }
+            } else {
+                occupiedByCell.textContent = '-';
+            }
+            
+            // Section cell
+            const sectionCell = document.createElement('td');
+            sectionCell.textContent = location.section || '-';
+            
+            // Notes cell
+            const notesCell = document.createElement('td');
+            if (location.notes) {
+                notesCell.textContent = location.notes;
+            } else {
+                // Add an "Add Note" button
+                const addNoteButton = document.createElement('button');
+                addNoteButton.className = 'button small';
+                addNoteButton.textContent = '+ Add Note';
+                addNoteButton.dataset.locationId = location._id;
+                
+                addNoteButton.addEventListener('click', function() {
+                    const note = prompt('Enter a note for this location:');
+                    if (note !== null) {
+                        addNoteToLocation(location._id, note, notesCell);
+                    }
+                });
+                
+                notesCell.appendChild(addNoteButton);
+            }
+            
+            // Actions cell
+            const actionsCell = document.createElement('td');
+            
+            const assignDriveButton = document.createElement('button');
+            assignDriveButton.className = 'button small';
+            assignDriveButton.textContent = 'Assign Drive';
+            assignDriveButton.dataset.locationId = location._id;
+            
+            assignDriveButton.addEventListener('click', async function() {
+                try {
+                    // First fetch a list of available drives
+                    let drives = [];
+                    
+                    if (USE_BACKEND) {
+                        const response = await fetch(`${API_BASE_URL}/api/drives`);
+                        if (response.ok) {
+                            drives = await response.json();
+                        } else {
+                            throw new Error('Failed to fetch drives');
+                        }
+                    } else {
+                        // Mock drives
+                        drives = [
+                            { id: 'drive-001', label: 'RED Footage Archive' },
+                            { id: 'drive-002', label: 'Client Delivery Shuttle' },
+                            { id: 'drive-003', label: 'Raw Interview Masters' }
+                        ];
+                    }
+                    
+                    // Create a select dropdown for available drives
+                    const selectDrive = document.createElement('select');
+                    selectDrive.innerHTML = '<option value="">Select a drive...</option>';
+                    
+                    drives.forEach(drive => {
+                        const option = document.createElement('option');
+                        option.value = drive.id || drive.driveId;
+                        option.textContent = drive.label || drive.volumeName || drive.id || drive.driveId;
+                        selectDrive.appendChild(option);
+                    });
+                    
+                    // Create a dialog for drive selection
+                    const dialog = document.createElement('div');
+                    dialog.className = 'modal';
+                    dialog.style.display = 'block';
+                    
+                    const dialogContent = document.createElement('div');
+                    dialogContent.className = 'modal-content';
+                    dialogContent.style.width = '400px';
+                    
+                    const closeBtn = document.createElement('span');
+                    closeBtn.className = 'close-modal';
+                    closeBtn.textContent = '×';
+                    closeBtn.onclick = function() {
+                        document.body.removeChild(dialog);
+                    };
+                    
+                    const heading = document.createElement('h3');
+                    heading.textContent = `Assign Drive to ${location.locationId}`;
+                    
+                    const form = document.createElement('div');
+                    form.appendChild(selectDrive);
+                    
+                    const confirmBtn = document.createElement('button');
+                    confirmBtn.className = 'button';
+                    confirmBtn.textContent = 'Assign';
+                    confirmBtn.style.marginTop = '15px';
+                    confirmBtn.onclick = function() {
+                        const driveId = selectDrive.value;
+                        if (!driveId) {
+                            alert('Please select a drive');
+                            return;
+                        }
+                        
+                        // Close dialog
+                        document.body.removeChild(dialog);
+                        
+                        // Assign drive to location
+                        assignDriveToLocation(location._id, driveId, occupiedByCell, statusSelect);
+                    };
+                    
+                    form.appendChild(document.createElement('br'));
+                    form.appendChild(confirmBtn);
+                    
+                    dialogContent.appendChild(closeBtn);
+                    dialogContent.appendChild(heading);
+                    dialogContent.appendChild(form);
+                    
+                    dialog.appendChild(dialogContent);
+                    document.body.appendChild(dialog);
+                    
+                } catch (error) {
+                    console.error('Error fetching drives for assignment:', error);
+                    alert('Failed to fetch drives: ' + error.message);
+                }
+            });
+            
+            const exportLabelButton = document.createElement('button');
+            exportLabelButton.className = 'button small';
+            exportLabelButton.textContent = 'Export Label';
+            
+            exportLabelButton.addEventListener('click', function() {
+                if (USE_BACKEND) {
+                    window.open(`${API_BASE_URL}/api/locations/${location._id}/export-label`, '_blank');
+                    console.log(`Export URL: ${API_BASE_URL}/api/locations/${location._id}/export-label`);
+                } else {
+                    alert(`Export Label for Location: ${location.locationId}`);
+                }
+            });
+            
+            const deleteButton = document.createElement('button');
+            deleteButton.className = 'button small danger';
+            deleteButton.textContent = 'Delete';
+            
+            deleteButton.addEventListener('click', function() {
+                if (confirm(`Are you sure you want to delete location ${location.locationId}?`)) {
+                    deleteLocation(location._id, row);
+                }
+            });
+            
+            actionsCell.appendChild(assignDriveButton);
+            actionsCell.appendChild(document.createTextNode(' '));
+            actionsCell.appendChild(exportLabelButton);
+            actionsCell.appendChild(document.createTextNode(' '));
+            actionsCell.appendChild(deleteButton);
+            
+            // Add all cells to the row
+            row.appendChild(idCell);
+            row.appendChild(statusCell);
+            row.appendChild(occupiedByCell);
+            row.appendChild(sectionCell);
+            row.appendChild(notesCell);
+            row.appendChild(actionsCell);
+            
+            // Add row to the table
+            locationsList.appendChild(row);
+        });
+    }
+    
+    // Add a note to a location
+    async function addNoteToLocation(locationId, note, notesCell) {
+        try {
+            if (USE_BACKEND) {
+                const response = await fetch(`${API_BASE_URL}/api/locations/${locationId}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ notes: note }),
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to update location notes');
+                }
+                
+                // Update the cell with the new note
+                notesCell.textContent = note;
+            } else {
+                // Mock update
+                notesCell.textContent = note;
+            }
+        } catch (error) {
+            console.error('Error adding note to location:', error);
+            alert('Failed to add note: ' + error.message);
+        }
+    }
+    
+    // Assign a drive to a location
+    async function assignDriveToLocation(locationId, driveId, occupiedByCell, statusSelect) {
+        try {
+            if (USE_BACKEND) {
+                const response = await fetch(`${API_BASE_URL}/api/locations/${locationId}`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ 
+                        occupiedBy: driveId,
+                        status: 'OCCUPIED'
+                    }),
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to assign drive to location');
+                }
+                
+                // Fetch drive details to update the cell
+                const driveResponse = await fetch(`${API_BASE_URL}/api/drives/${driveId}`);
+                if (driveResponse.ok) {
+                    const drive = await driveResponse.json();
+                    occupiedByCell.textContent = drive.label || drive.volumeName || drive.driveId || driveId;
+                } else {
+                    occupiedByCell.textContent = driveId;
+                }
+                
+                // Update status select
+                statusSelect.value = 'OCCUPIED';
+                
+                // Update the row class
+                const row = occupiedByCell.parentElement;
+                row.className = 'occupied-location';
+                
+                // Update location summary
+                loadLocationsSummary();
+            } else {
+                // Mock assignment
+                occupiedByCell.textContent = `Drive ${driveId}`;
+                statusSelect.value = 'OCCUPIED';
+                
+                // Update the row class
+                const row = occupiedByCell.parentElement;
+                row.className = 'occupied-location';
+            }
+        } catch (error) {
+            console.error('Error assigning drive to location:', error);
+            alert('Failed to assign drive: ' + error.message);
+        }
+    }
+    
+    // Delete a location
+    async function deleteLocation(locationId, row) {
+        try {
+            if (USE_BACKEND) {
+                const response = await fetch(`${API_BASE_URL}/api/locations/${locationId}`, {
+                    method: 'DELETE'
+                });
+                
+                if (!response.ok) {
+                    throw new Error('Failed to delete location');
+                }
+                
+                // Remove the row from the table
+                row.parentElement.removeChild(row);
+                
+                // Update summary data
+                loadLocationsSummary();
+                
+                // Update bay dropdown (in case we deleted the only location in a bay/shelf)
+                loadLocationBays();
+                
+                // Update visualization
+                const bayFilter = document.getElementById('location-bay-filter').value;
+                if (bayFilter) {
+                    renderBayVisualization(parseInt(bayFilter));
+                }
+            } else {
+                // Mock deletion
+                row.parentElement.removeChild(row);
+            }
+        } catch (error) {
+            console.error('Error deleting location:', error);
+            alert('Failed to delete location: ' + error.message);
+        }
+    }
+    
+    // Load locations summary
+    async function loadLocationsSummary() {
+        const summaryContainer = document.getElementById('locations-summary');
+        if (!summaryContainer) return;
+        
+        try {
+            if (USE_BACKEND) {
+                console.log('Fetching locations summary from API...');
+                const response = await fetch(`${API_BASE_URL}/api/locations/summary`);
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch locations summary');
+                }
+                
+                const summary = await response.json();
+                console.log('Received locations summary:', summary);
+                
+                displayLocationsSummary(summary);
+            } else {
+                console.log('Generating mock locations summary...');
+                loadMockLocationsSummary();
+            }
+        } catch (error) {
+            console.error('Error loading locations summary:', error);
+            summaryContainer.innerHTML = '<p>Error loading locations summary</p>';
+        }
+    }
+    
+    // Display locations summary
+    function displayLocationsSummary(summary) {
+        const summaryContainer = document.getElementById('locations-summary');
+        if (!summaryContainer) return;
+        
+        // Clear existing content
+        summaryContainer.innerHTML = '';
+        
+        // Check if summary is empty
+        if (Object.keys(summary).length === 0) {
+            summaryContainer.innerHTML = '<p>No locations have been created yet</p>';
+            return;
+        }
+        
+        // Create summary table
+        const table = document.createElement('table');
+        table.className = 'summary-table';
+        
+        // Create header row
+        const thead = document.createElement('thead');
+        const headerRow = document.createElement('tr');
+        
+        const bayHeader = document.createElement('th');
+        bayHeader.textContent = 'Bay';
+        
+        const totalHeader = document.createElement('th');
+        totalHeader.textContent = 'Total Locations';
+        
+        const occupiedHeader = document.createElement('th');
+        occupiedHeader.textContent = 'Occupied';
+        
+        const emptyHeader = document.createElement('th');
+        emptyHeader.textContent = 'Empty';
+        
+        const detailsHeader = document.createElement('th');
+        detailsHeader.textContent = 'Details';
+        
+        const actionsHeader = document.createElement('th');
+        actionsHeader.textContent = 'Actions';
+        
+        headerRow.appendChild(bayHeader);
+        headerRow.appendChild(totalHeader);
+        headerRow.appendChild(occupiedHeader);
+        headerRow.appendChild(emptyHeader);
+        headerRow.appendChild(detailsHeader);
+        headerRow.appendChild(actionsHeader);
+        
+        thead.appendChild(headerRow);
+        table.appendChild(thead);
+        
+        // Create table body
+        const tbody = document.createElement('tbody');
+        
+        // Add rows for each bay
+        Object.keys(summary).sort().forEach(bayKey => {
+            const bayData = summary[bayKey];
+            
+            // Create bay row
+            const bayRow = document.createElement('tr');
+            bayRow.classList.add('bay-row');
+            
+            const bayCell = document.createElement('td');
+            bayCell.textContent = bayKey;
+            
+            const totalCell = document.createElement('td');
+            totalCell.textContent = bayData.totalLocations;
+            
+            const occupiedCell = document.createElement('td');
+            occupiedCell.textContent = bayData.occupied;
+            
+            const emptyCell = document.createElement('td');
+            emptyCell.textContent = bayData.empty;
+            
+            const detailsCell = document.createElement('td');
+            const toggleButton = document.createElement('button');
+            toggleButton.className = 'button small toggle-details';
+            toggleButton.textContent = 'Show Shelves';
+            toggleButton.dataset.expanded = 'false';
+            toggleButton.dataset.bay = bayKey;
+            
+            toggleButton.addEventListener('click', function() {
+                const isExpanded = this.dataset.expanded === 'true';
+                this.dataset.expanded = isExpanded ? 'false' : 'true';
+                this.textContent = isExpanded ? 'Show Shelves' : 'Hide Shelves';
+                
+                // Toggle visibility of shelf rows for this bay
+                document.querySelectorAll(`.shelf-row[data-bay="${bayKey}"]`).forEach(row => {
+                    row.style.display = isExpanded ? 'none' : 'table-row';
+                });
+            });
+            
+            detailsCell.appendChild(toggleButton);
+            
+            const actionsCell = document.createElement('td');
+            const viewButton = document.createElement('button');
+            viewButton.className = 'button small';
+            viewButton.textContent = 'View';
+            
+            viewButton.addEventListener('click', function() {
+                // Extract bay number from bay key (format: "Bay X")
+                const bayNumber = bayKey.split(' ')[1];
+                
+                // Set bay filter and trigger change event
+                const bayFilter = document.getElementById('location-bay-filter');
+                if (bayFilter) {
+                    bayFilter.value = bayNumber;
+                    
+                    // Manually trigger change event
+                    const event = new Event('change');
+                    bayFilter.dispatchEvent(event);
+                    
+                    // Load locations for this bay
+                    loadFilteredLocations();
+                    
+                    // Scroll to locations section
+                    document.querySelector('.card h3:contains("Storage Location Browser")').scrollIntoView({
+                        behavior: 'smooth'
+                    });
+                }
+            });
+            
+            const exportButton = document.createElement('button');
+            exportButton.className = 'button small';
+            exportButton.textContent = 'Export Labels';
+            
+            exportButton.addEventListener('click', function() {
+                if (USE_BACKEND) {
+                    // Extract bay number from bay key (format: "Bay X")
+                    const bayNumber = bayKey.split(' ')[1];
+                    window.open(`${API_BASE_URL}/api/locations/export-batch?bay=${bayNumber}`, '_blank');
+                } else {
+                    alert(`Export Labels for ${bayKey}`);
+                }
+            });
+            
+            actionsCell.appendChild(viewButton);
+            actionsCell.appendChild(document.createTextNode(' '));
+            actionsCell.appendChild(exportButton);
+            
+            bayRow.appendChild(bayCell);
+            bayRow.appendChild(totalCell);
+            bayRow.appendChild(occupiedCell);
+            bayRow.appendChild(emptyCell);
+            bayRow.appendChild(detailsCell);
+            bayRow.appendChild(actionsCell);
+            
+            tbody.appendChild(bayRow);
+            
+            // Add shelf rows for this bay (initially hidden)
+            Object.keys(bayData.shelves).sort().forEach(shelfKey => {
+                const shelfData = bayData.shelves[shelfKey];
+                
+                const shelfRow = document.createElement('tr');
+                shelfRow.classList.add('shelf-row');
+                shelfRow.dataset.bay = bayKey;
+                shelfRow.style.display = 'none'; // Initially hidden
+                
+                const shelfCell = document.createElement('td');
+                shelfCell.textContent = `  ${shelfKey}`;
+                shelfCell.style.paddingLeft = '20px';
+                
+                const shelfTotalCell = document.createElement('td');
+                shelfTotalCell.textContent = shelfData.totalLocations;
+                
+                const shelfOccupiedCell = document.createElement('td');
+                shelfOccupiedCell.textContent = shelfData.occupied;
+                
+                const shelfEmptyCell = document.createElement('td');
+                shelfEmptyCell.textContent = shelfData.empty;
+                
+                const shelfDetailsCell = document.createElement('td');
+                // No details button for shelves
+                
+                const shelfActionsCell = document.createElement('td');
+                const viewShelfButton = document.createElement('button');
+                viewShelfButton.className = 'button small';
+                viewShelfButton.textContent = 'View';
+                
+                viewShelfButton.addEventListener('click', function() {
+                    // Extract bay and shelf numbers
+                    const bayNumber = bayKey.split(' ')[1];
+                    const shelfNumber = shelfKey.split(' ')[1];
+                    
+                    // Set bay and shelf filters
+                    const bayFilter = document.getElementById('location-bay-filter');
+                    const shelfFilter = document.getElementById('location-shelf-filter');
+                    
+                    if (bayFilter && shelfFilter) {
+                        bayFilter.value = bayNumber;
+                        
+                        // Trigger bay filter change to load shelves
+                        const bayEvent = new Event('change');
+                        bayFilter.dispatchEvent(bayEvent);
+                        
+                        // Now set shelf filter
+                        setTimeout(() => {
+                            shelfFilter.value = shelfNumber;
+                            
+                            // Load locations for this bay/shelf
+                            loadFilteredLocations();
+                            
+                            // Scroll to locations section
+                            document.querySelector('.card h3:contains("Storage Location Browser")').scrollIntoView({
+                                behavior: 'smooth'
+                            });
+                        }, 100);
+                    }
+                });
+                
+                const exportShelfButton = document.createElement('button');
+                exportShelfButton.className = 'button small';
+                exportShelfButton.textContent = 'Export Labels';
+                
+                exportShelfButton.addEventListener('click', function() {
+                    if (USE_BACKEND) {
+                        // Extract bay and shelf numbers
+                        const bayNumber = bayKey.split(' ')[1];
+                        const shelfNumber = shelfKey.split(' ')[1];
+                        window.open(`${API_BASE_URL}/api/locations/export-batch?bay=${bayNumber}&shelf=${shelfNumber}`, '_blank');
+                    } else {
+                        alert(`Export Labels for ${bayKey}, ${shelfKey}`);
+                    }
+                });
+                
+                shelfActionsCell.appendChild(viewShelfButton);
+                shelfActionsCell.appendChild(document.createTextNode(' '));
+                shelfActionsCell.appendChild(exportShelfButton);
+                
+                shelfRow.appendChild(shelfCell);
+                shelfRow.appendChild(shelfTotalCell);
+                shelfRow.appendChild(shelfOccupiedCell);
+                shelfRow.appendChild(shelfEmptyCell);
+                shelfRow.appendChild(shelfDetailsCell);
+                shelfRow.appendChild(shelfActionsCell);
+                
+                tbody.appendChild(shelfRow);
+            });
+        });
+        
+        table.appendChild(tbody);
+        summaryContainer.appendChild(table);
+    }
+    
+    // Load mock locations summary
+    function loadMockLocationsSummary() {
+        const mockSummary = {
+            'Bay 1': {
+                totalLocations: 30,
+                occupied: 24,
+                empty: 6,
+                shelves: {
+                    'Shelf 1': { totalLocations: 10, occupied: 9, empty: 1 },
+                    'Shelf 2': { totalLocations: 10, occupied: 8, empty: 2 },
+                    'Shelf 3': { totalLocations: 10, occupied: 7, empty: 3 }
+                }
+            },
+            'Bay 2': {
+                totalLocations: 30,
+                occupied: 15,
+                empty: 15,
+                shelves: {
+                    'Shelf 1': { totalLocations: 10, occupied: 5, empty: 5 },
+                    'Shelf 2': { totalLocations: 10, occupied: 5, empty: 5 },
+                    'Shelf 3': { totalLocations: 10, occupied: 5, empty: 5 }
+                }
+            },
+            'Bay 3': {
+                totalLocations: 30,
+                occupied: 6,
+                empty: 24,
+                shelves: {
+                    'Shelf 1': { totalLocations: 10, occupied: 3, empty: 7 },
+                    'Shelf 2': { totalLocations: 10, occupied: 2, empty: 8 },
+                    'Shelf 3': { totalLocations: 10, occupied: 1, empty: 9 }
+                }
+            }
+        };
+        
+        displayLocationsSummary(mockSummary);
+    }
+    
+    // Load location bays for dropdown
+    async function loadLocationBays() {
+        const bayFilter = document.getElementById('location-bay-filter');
+        if (!bayFilter) return;
+        
+        try {
+            if (USE_BACKEND) {
+                console.log('Fetching locations from API for bays...');
+                const response = await fetch(`${API_BASE_URL}/api/locations`);
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch locations');
+                }
+                
+                const locations = await response.json();
+                
+                // Extract unique bay numbers
+                const bays = [...new Set(locations.map(loc => loc.bay))].sort((a, b) => a - b);
+                
+                populateBayFilter(bays);
+            } else {
+                console.log('Using mock location data for bays...');
+                populateMockLocationBays();
+            }
+        } catch (error) {
+            console.error('Error loading location bays:', error);
+            populateMockLocationBays(); // Fallback to mock data
+        }
+    }
+    
+    // Populate bay filter dropdown
+    function populateBayFilter(bays) {
+        const bayFilter = document.getElementById('location-bay-filter');
+        if (!bayFilter) return;
+        
+        // Keep the first "All Bays" option
+        bayFilter.innerHTML = '<option value="">All Bays</option>';
+        
+        // Add each bay as an option
+        bays.forEach(bay => {
+            const option = document.createElement('option');
+            option.value = bay;
+            option.textContent = `Bay ${bay}`;
+            bayFilter.appendChild(option);
+        });
+    }
+    
+    // Populate mock location bays
+    function populateMockLocationBays() {
+        const mockBays = [1, 2, 3];
+        populateBayFilter(mockBays);
+    }
+    
+    // Load shelves for a specific bay
+    async function loadLocationShelves(bay) {
+        const shelfFilter = document.getElementById('location-shelf-filter');
+        if (!shelfFilter) return;
+        
+        try {
+            if (USE_BACKEND) {
+                console.log(`Fetching shelves for Bay ${bay} from API...`);
+                const response = await fetch(`${API_BASE_URL}/api/locations?bay=${bay}`);
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch locations');
+                }
+                
+                const locations = await response.json();
+                
+                // Extract unique shelf numbers
+                const shelves = [...new Set(locations.map(loc => loc.shelf))].sort((a, b) => a - b);
+                
+                populateShelfFilter(shelves);
+            } else {
+                console.log(`Using mock shelves for Bay ${bay}...`);
+                populateMockLocationShelves(bay);
+            }
+        } catch (error) {
+            console.error('Error loading location shelves:', error);
+            populateMockLocationShelves(bay); // Fallback to mock data
+        }
+    }
+    
+    // Populate shelf filter dropdown
+    function populateShelfFilter(shelves) {
+        const shelfFilter = document.getElementById('location-shelf-filter');
+        if (!shelfFilter) return;
+        
+        // Keep the first "All Shelves" option
+        shelfFilter.innerHTML = '<option value="">All Shelves</option>';
+        
+        // Add each shelf as an option
+        shelves.forEach(shelf => {
+            const option = document.createElement('option');
+            option.value = shelf;
+            option.textContent = `Shelf ${shelf}`;
+            shelfFilter.appendChild(option);
+        });
+    }
+    
+    // Populate mock location shelves
+    function populateMockLocationShelves(bay) {
+        const mockShelves = [1, 2, 3];
+        populateShelfFilter(mockShelves);
+    }
+    
+    // Generate mock locations
+    function generateMockLocations(bay, shelf, status) {
+        const mockLocations = [];
+        
+        // Define bay and shelf ranges based on filters
+        const bayNumbers = bay ? [parseInt(bay)] : [1, 2, 3];
+        
+        for (const bayNum of bayNumbers) {
+            const shelfNumbers = shelf ? [parseInt(shelf)] : [1, 2, 3];
+            
+            for (const shelfNum of shelfNumbers) {
+                // Generate 10 positions per shelf
+                for (let position = 1; position <= 10; position++) {
+                    // Generate a random status if not filtered
+                    const statuses = ['EMPTY', 'OCCUPIED', 'RESERVED', 'MAINTENANCE'];
+                    const randomStatus = status || statuses[Math.floor(Math.random() * statuses.length)];
+                    
+                    // Skip if status filter doesn't match
+                    if (status && status !== randomStatus) {
+                        continue;
+                    }
+                    
+                    // Create mock location
+                    const mockLocation = {
+                        _id: `mock-location-${bayNum}-${shelfNum}-${position}`,
+                        bay: bayNum,
+                        shelf: shelfNum,
+                        position,
+                        status: randomStatus,
+                        locationId: `B${bayNum}-S${shelfNum}-P${position}`,
+                        section: Math.random() > 0.7 ? `Section ${String.fromCharCode(65 + Math.floor(Math.random() * 5))}` : '',
+                        notes: Math.random() > 0.8 ? `Mock note for position ${position}` : '',
+                        occupiedBy: randomStatus === 'OCCUPIED' ? `drive-${Math.floor(Math.random() * 999) + 1}` : null,
+                        createdAt: new Date(Date.now() - Math.random() * 30 * 24 * 60 * 60 * 1000).toISOString()
+                    };
+                    
+                    mockLocations.push(mockLocation);
+                }
+            }
+        }
+        
+        return mockLocations;
+    }
+    
+    // Render visual bay/shelf layout
+    async function renderBayVisualization(bayNumber) {
+        const visualContainer = document.getElementById('bay-shelf-visualization');
+        if (!visualContainer) return;
+        
+        try {
+            if (USE_BACKEND) {
+                console.log(`Rendering visualization for Bay ${bayNumber}...`);
+                
+                // Fetch all locations for this bay
+                const response = await fetch(`${API_BASE_URL}/api/locations?bay=${bayNumber}`);
+                
+                if (!response.ok) {
+                    throw new Error('Failed to fetch locations');
+                }
+                
+                const locations = await response.json();
+                
+                // Create the visualization
+                createBayVisualization(visualContainer, bayNumber, locations);
+            } else {
+                console.log(`Rendering mock visualization for Bay ${bayNumber}...`);
+                renderMockBayVisualization(bayNumber);
+            }
+        } catch (error) {
+            console.error('Error rendering bay visualization:', error);
+            visualContainer.innerHTML = '<p>Error rendering visualization</p>';
+        }
+    }
+    
+    // Create bay visualization
+    function createBayVisualization(container, bayNumber, locations) {
+        // Clear container
+        container.innerHTML = '';
+        
+        // Group locations by shelf
+        const shelvesByNumber = {};
+        
+        locations.forEach(location => {
+            if (!shelvesByNumber[location.shelf]) {
+                shelvesByNumber[location.shelf] = [];
+            }
+            shelvesByNumber[location.shelf].push(location);
+        });
+        
+        // Title for the visualization
+        const title = document.createElement('h3');
+        title.textContent = `Bay ${bayNumber} Layout`;
+        container.appendChild(title);
+        
+        // Check if any locations exist
+        if (Object.keys(shelvesByNumber).length === 0) {
+            const message = document.createElement('p');
+            message.textContent = `No locations found in Bay ${bayNumber}`;
+            container.appendChild(message);
+            return;
+        }
+        
+        // Create bay container
+        const bayContainer = document.createElement('div');
+        bayContainer.className = 'bay-visualization';
+        
+        // For each shelf, create a shelf row
+        Object.keys(shelvesByNumber).sort((a, b) => a - b).forEach(shelfNumber => {
+            const shelfLocations = shelvesByNumber[shelfNumber];
+            
+            // Create shelf container
+            const shelfContainer = document.createElement('div');
+            shelfContainer.className = 'shelf-visualization';
+            
+            // Shelf label
+            const shelfLabel = document.createElement('div');
+            shelfLabel.className = 'shelf-label';
+            shelfLabel.textContent = `Shelf ${shelfNumber}`;
+            shelfContainer.appendChild(shelfLabel);
+            
+            // Create position blocks
+            shelfLocations.sort((a, b) => a.position - b.position).forEach(location => {
+                const positionBlock = document.createElement('div');
+                positionBlock.className = 'position-block';
+                positionBlock.dataset.status = location.status.toLowerCase();
+                positionBlock.title = `${location.locationId}${location.occupiedBy ? `\nOccupied by: ${location.occupiedBy}` : ''}`;
+                
+                // Position number
+                const positionLabel = document.createElement('div');
+                positionLabel.className = 'position-label';
+                positionLabel.textContent = location.position;
+                positionBlock.appendChild(positionLabel);
+                
+                // Click handler to view/edit location
+                positionBlock.addEventListener('click', function() {
+                    // Create a dialog for location details
+                    showLocationDetails(location);
+                });
+                
+                shelfContainer.appendChild(positionBlock);
+            });
+            
+            bayContainer.appendChild(shelfContainer);
+        });
+        
+        container.appendChild(bayContainer);
+        
+        // Add legend
+        const legend = document.createElement('div');
+        legend.className = 'visualization-legend';
+        
+        const legendItems = [
+            { status: 'empty', label: 'Empty' },
+            { status: 'occupied', label: 'Occupied' },
+            { status: 'reserved', label: 'Reserved' },
+            { status: 'maintenance', label: 'Maintenance' }
+        ];
+        
+        legendItems.forEach(item => {
+            const legendItem = document.createElement('div');
+            legendItem.className = 'legend-item';
+            
+            const colorBox = document.createElement('div');
+            colorBox.className = 'legend-color';
+            colorBox.dataset.status = item.status;
+            
+            const label = document.createElement('span');
+            label.textContent = item.label;
+            
+            legendItem.appendChild(colorBox);
+            legendItem.appendChild(label);
+            legend.appendChild(legendItem);
+        });
+        
+        container.appendChild(legend);
+    }
+    
+    // Show location details popup
+    function showLocationDetails(location) {
+        // Create a dialog for location details
+        const dialog = document.createElement('div');
+        dialog.className = 'modal';
+        dialog.style.display = 'block';
+        
+        const dialogContent = document.createElement('div');
+        dialogContent.className = 'modal-content';
+        
+        const closeBtn = document.createElement('span');
+        closeBtn.className = 'close-modal';
+        closeBtn.textContent = '×';
+        closeBtn.onclick = function() {
+            document.body.removeChild(dialog);
+        };
+        
+        const heading = document.createElement('h3');
+        heading.textContent = `Location Details: ${location.locationId}`;
+        
+        const details = document.createElement('div');
+        details.className = 'location-details';
+        
+        // Status with color coding
+        const statusDiv = document.createElement('div');
+        statusDiv.className = 'detail-row';
+        statusDiv.innerHTML = `<strong>Status:</strong> <span class="status-badge" data-status="${location.status.toLowerCase()}">${location.status}</span>`;
+        
+        // Occupied by
+        const occupiedDiv = document.createElement('div');
+        occupiedDiv.className = 'detail-row';
+        occupiedDiv.innerHTML = `<strong>Occupied By:</strong> ${location.occupiedBy ? location.occupiedBy : 'None'}`;
+        
+        // Section
+        const sectionDiv = document.createElement('div');
+        sectionDiv.className = 'detail-row';
+        sectionDiv.innerHTML = `<strong>Section:</strong> ${location.section || 'None'}`;
+        
+        // Notes
+        const notesDiv = document.createElement('div');
+        notesDiv.className = 'detail-row';
+        notesDiv.innerHTML = `<strong>Notes:</strong> ${location.notes || 'None'}`;
+        
+        // Created date
+        const createdDiv = document.createElement('div');
+        createdDiv.className = 'detail-row';
+        createdDiv.innerHTML = `<strong>Created:</strong> ${formatDate(location.createdAt || new Date().toISOString())}`;
+        
+        // Add all details
+        details.appendChild(statusDiv);
+        details.appendChild(occupiedDiv);
+        details.appendChild(sectionDiv);
+        details.appendChild(notesDiv);
+        details.appendChild(createdDiv);
+        
+        // Actions
+        const actionsDiv = document.createElement('div');
+        actionsDiv.className = 'location-actions';
+        
+        const exportButton = document.createElement('button');
+        exportButton.className = 'button';
+        exportButton.textContent = 'Export Label';
+        exportButton.onclick = function() {
+            if (USE_BACKEND) {
+                window.open(`${API_BASE_URL}/api/locations/${location._id}/export-label`, '_blank');
+                document.body.removeChild(dialog);
+            } else {
+                alert(`Export Label for Location: ${location.locationId}`);
+                document.body.removeChild(dialog);
+            }
+        };
+        
+        actionsDiv.appendChild(exportButton);
+        
+        // Assemble dialog
+        dialogContent.appendChild(closeBtn);
+        dialogContent.appendChild(heading);
+        dialogContent.appendChild(details);
+        dialogContent.appendChild(actionsDiv);
+        
+        dialog.appendChild(dialogContent);
+        document.body.appendChild(dialog);
+    }
+    
+    // Render mock bay visualization
+    function renderMockBayVisualization(bayNumber, shelfNumber = null) {
+        const visualContainer = document.getElementById('bay-shelf-visualization');
+        if (!visualContainer) return;
+        
+        // Generate mock locations for this bay
+        const mockBayLocations = [];
+        
+        const shelfNumbers = shelfNumber ? [shelfNumber] : [1, 2, 3];
+        
+        for (const shelf of shelfNumbers) {
+            for (let position = 1; position <= 10; position++) {
+                // Determine a mock status - weighted to have more occupied than empty
+                let status;
+                const rand = Math.random();
+                if (rand < 0.6) {
+                    status = 'OCCUPIED';
+                } else if (rand < 0.8) {
+                    status = 'EMPTY';
+                } else if (rand < 0.9) {
+                    status = 'RESERVED';
+                } else {
+                    status = 'MAINTENANCE';
+                }
+                
+                mockBayLocations.push({
+                    _id: `mock-location-${bayNumber}-${shelf}-${position}`,
+                    bay: bayNumber,
+                    shelf,
+                    position,
+                    status,
+                    locationId: `B${bayNumber}-S${shelf}-P${position}`,
+                    section: Math.random() > 0.7 ? `Section ${String.fromCharCode(65 + Math.floor(Math.random() * 5))}` : '',
+                    notes: Math.random() > 0.8 ? `Mock note for position ${position}` : '',
+                    occupiedBy: status === 'OCCUPIED' ? `drive-${Math.floor(Math.random() * 999) + 1}` : null,
+                    createdAt: new Date(Date.now() - Math.random() * 30 * 24 * 60 * 60 * 1000).toISOString()
+                });
+            }
+        }
+        
+        // Create the visualization
+        createBayVisualization(visualContainer, bayNumber, mockBayLocations);
     }
     
     // Initialize the app

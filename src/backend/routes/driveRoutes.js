@@ -415,6 +415,88 @@ router.post('/:id/print-label', async (req, res) => {
   }
 });
 
+// GET export drive label CSV
+router.get('/:id/export-label', async (req, res) => {
+  try {
+    const drive = await StorageDrive.findById(req.params.id);
+    
+    if (!drive) {
+      return res.status(404).json({ error: 'Drive not found' });
+    }
+    
+    // Ensure drive has root folders
+    if (!drive.rootFolders || drive.rootFolders.length === 0) {
+      try {
+        await drive.scanRootFolders();
+      } catch (err) {
+        console.warn(`Could not scan root folders for drive ${drive.name}:`, err.message);
+      }
+    }
+    
+    // Get media stats
+    let mediaStats = {};
+    try {
+      const stats = await drive.getUsageStats();
+      if (stats.success && stats.stats.byType) {
+        stats.stats.byType.forEach(item => {
+          mediaStats[item._id] = item.count;
+        });
+      }
+    } catch (err) {
+      console.log('Could not get detailed media stats, using basic file count');
+      mediaStats['Files'] = drive.fileCount || 0;
+    }
+    
+    // Generate QR code data
+    const qrData = JSON.stringify({
+      type: 'drive',
+      id: drive.driveId,
+      uuid: drive.uuid || '',
+      name: drive.name,
+      date: drive.createdAt ? drive.createdAt.toISOString() : new Date().toISOString()
+    });
+    
+    // Format CSV data
+    const rootFolders = drive.rootFolders ? drive.rootFolders.join('\\n') : '';
+    const formattedStats = Object.entries(mediaStats)
+      .map(([type, count]) => `${type}: ${count}`)
+      .join('\\n');
+    const date = drive.createdAt ? 
+      new Date(drive.createdAt).toLocaleDateString() : 
+      new Date().toLocaleDateString();
+    
+    // Create a single formatted text for the complete label
+    const labelText = `${drive.name || 'Unnamed Drive'}\\n` +
+                     `ID: ${drive.driveId}\\n` +
+                     `${rootFolders}\\n` +
+                     `${formattedStats}\\n` +
+                     `Added: ${date}`;
+    
+    // Create CSV header and content
+    const csvHeader = 'Drive_ID,Drive_Name,Root_Folders,Media_Stats,Date_Added,QR_Code_Data,Label_Text\n';
+    const csvRow = `"${drive.driveId || ''}",` +
+                  `"${drive.name || 'Unnamed Drive'}",` +
+                  `"${rootFolders}",` +
+                  `"${formattedStats}",` +
+                  `"${date}",` +
+                  `"${qrData}",` +
+                  `"${labelText}"\n`;
+    
+    const csvContent = csvHeader + csvRow;
+    
+    // Set headers for download
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="drive_label_${drive.driveId}.csv"`);
+    
+    // Send CSV response
+    res.send(csvContent);
+    
+  } catch (error) {
+    console.error('Error exporting drive label CSV:', error);
+    res.status(500).json({ error: 'Failed to export drive label' });
+  }
+});
+
 // POST assign drive to location and generate labels for both
 router.post('/:id/assign-location', async (req, res) => {
   try {

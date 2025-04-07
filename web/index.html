@@ -15,6 +15,7 @@
                 <ul>
                     <li><a href="#query-tool" class="active" data-page="query-tool">Query Tool</a></li>
                     <li><a href="#drives" data-page="drives">Drives</a></li>
+                    <li><a href="#locations" data-page="locations">Locations</a></li>
                     <li><a href="#projects" data-page="projects">Projects</a></li>
                     <li><a href="#reports" data-page="reports">Reports</a></li>
                 </ul>
@@ -214,6 +215,124 @@
                         </tr>
                     </tbody>
                 </table>
+            </div>
+        </div>
+        
+        <!-- Locations Page -->
+        <div id="page-locations" class="page">
+            <div class="card">
+                <h2>Shelf Locations Management</h2>
+                <p>View and manage physical storage locations for drives organized by Bay-Shelf-Position.</p>
+            </div>
+            
+            <div class="card">
+                <h3>Create New Location</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="new-location-bay">Bay:</label>
+                        <input type="number" id="new-location-bay" min="1" placeholder="Bay #" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="new-location-shelf">Shelf:</label>
+                        <input type="number" id="new-location-shelf" min="1" placeholder="Shelf #" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="new-location-position">Position:</label>
+                        <input type="number" id="new-location-position" min="1" placeholder="Position #" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="new-location-section">Section (optional):</label>
+                        <input type="text" id="new-location-section" placeholder="Section">
+                    </div>
+                    <button id="create-location-button" class="button">Create Location</button>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>Batch Location Creation</h3>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="batch-bay">Bay:</label>
+                        <input type="number" id="batch-bay" min="1" placeholder="Bay #" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="batch-shelf">Shelf:</label>
+                        <input type="number" id="batch-shelf" min="1" placeholder="Shelf #" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="batch-positions">Number of Positions:</label>
+                        <input type="number" id="batch-positions" min="1" max="50" value="10" placeholder="# of positions">
+                    </div>
+                    <div class="form-group">
+                        <label for="batch-section">Section (optional):</label>
+                        <input type="text" id="batch-section" placeholder="Section">
+                    </div>
+                    <button id="create-batch-locations-button" class="button">Create Batch</button>
+                </div>
+            </div>
+            
+            <div class="card">
+                <h3>Storage Location Browser</h3>
+                <div class="filters-row">
+                    <div class="form-group">
+                        <label for="location-bay-filter">Bay:</label>
+                        <select id="location-bay-filter">
+                            <option value="">All Bays</option>
+                            <!-- Will be populated dynamically -->
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="location-shelf-filter">Shelf:</label>
+                        <select id="location-shelf-filter">
+                            <option value="">All Shelves</option>
+                            <!-- Will be populated dynamically -->
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="location-status-filter">Status:</label>
+                        <select id="location-status-filter">
+                            <option value="">All Statuses</option>
+                            <option value="EMPTY">Empty</option>
+                            <option value="OCCUPIED">Occupied</option>
+                            <option value="RESERVED">Reserved</option>
+                            <option value="MAINTENANCE">Maintenance</option>
+                        </select>
+                    </div>
+                    <button id="load-locations-button" class="button">Load Locations</button>
+                </div>
+                
+                <div id="locations-visual-container">
+                    <h4>Visual Layout</h4>
+                    <div id="bay-shelf-visualization">
+                        <!-- Visual bay/shelf layout will be rendered here -->
+                        <p>Select a bay to view visual layout</p>
+                    </div>
+                </div>
+                
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Location ID</th>
+                            <th>Status</th>
+                            <th>Occupied By</th>
+                            <th>Section</th>
+                            <th>Notes</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="locations-list">
+                        <tr>
+                            <td colspan="6">Select filters and click "Load Locations"</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div class="card">
+                <h3>Storage Location Summary</h3>
+                <div id="locations-summary">
+                    <p>Loading summary...</p>
+                </div>
             </div>
         </div>
         

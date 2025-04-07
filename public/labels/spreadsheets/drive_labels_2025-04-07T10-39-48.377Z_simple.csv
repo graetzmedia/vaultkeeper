@@ -1,0 +1,6 @@
+Drive_Name,Root_Folders,QR_Code_Data
+"HDD Drive 1","","{"type":"drive","id":"drive1","name":"HDD Drive 1"}"
+"SSD Drive 2","","{"type":"drive","id":"drive2","name":"SSD Drive 2"}"
+"HDD Drive 3","","{"type":"drive","id":"drive3","name":"HDD Drive 3"}"
+"NVMe Drive 4","","{"type":"drive","id":"drive4","name":"NVMe Drive 4"}"
+"RAID Drive 5","","{"type":"drive","id":"drive5","name":"RAID Drive 5"}"

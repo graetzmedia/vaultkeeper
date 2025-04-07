@@ -126,6 +126,88 @@ def get_drives():
     
     return jsonify(drives)
 
+@app.route('/api/drives/<drive_id>/export-label', methods=['GET'])
+def export_drive_label(drive_id):
+    """Export drive label as CSV for Niimbot thermal printer"""
+    conn = get_db_connection()
+    conn.row_factory = dict_factory
+    cursor = conn.cursor()
+    
+    # Verify drive exists
+    cursor.execute("SELECT id, label, volume_name, date_cataloged FROM drives WHERE id = ?", (drive_id,))
+    drive = cursor.fetchone()
+    
+    if not drive:
+        conn.close()
+        return jsonify({'error': 'Drive not found'}), 404
+    
+    # Get root folders
+    cursor.execute("""
+    SELECT DISTINCT SUBSTR(path, 1, INSTR(path || '/', '/') - 1) as folder
+    FROM files
+    WHERE drive_id = ? AND path IS NOT NULL AND path != ''
+    ORDER BY folder
+    """, (drive_id,))
+    
+    folders = cursor.fetchall()
+    root_folders = '\n'.join([f['folder'] for f in folders])
+    
+    # Get media stats
+    cursor.execute("""
+    SELECT extension, COUNT(*) as count
+    FROM files
+    WHERE drive_id = ?
+    GROUP BY extension
+    """, (drive_id,))
+    
+    stats = cursor.fetchall()
+    media_stats = '\n'.join([f"{item['extension']}: {item['count']}" for item in stats])
+    
+    conn.close()
+    
+    # Generate QR code data
+    import json
+    qr_data = json.dumps({
+        'type': 'drive',
+        'id': drive['id'],
+        'name': drive['label'] or drive['volume_name'],
+        'date': drive['date_cataloged']
+    })
+    
+    # Format CSV data
+    date = drive['date_cataloged'].split('T')[0] if drive['date_cataloged'] and 'T' in drive['date_cataloged'] else ''
+    
+    # Create a single formatted text for the complete label
+    label_text = f"{drive['label'] or drive['volume_name'] or 'Unnamed Drive'}\n" + \
+                 f"ID: {drive['id']}\n" + \
+                 f"{root_folders}\n" + \
+                 f"{media_stats}\n" + \
+                 f"Added: {date}"
+    
+    # Create CSV header and content
+    csv_header = 'Drive_ID,Drive_Name,Root_Folders,Media_Stats,Date_Added,QR_Code_Data,Label_Text\n'
+    csv_row = f"\"{drive['id']}\","\
+             f"\"{drive['label'] or drive['volume_name'] or 'Unnamed Drive'}\","\
+             f"\"{root_folders}\","\
+             f"\"{media_stats}\","\
+             f"\"{date}\","\
+             f"\"{qr_data}\","\
+             f"\"{label_text}\"\n"
+    
+    csv_content = csv_header + csv_row
+    
+    # Set headers for download
+    from flask import Response
+    response = Response(
+        csv_content,
+        mimetype='text/csv',
+        headers={
+            'Content-Disposition': f'attachment; filename=drive_label_{drive["id"]}.csv'
+        }
+    )
+    
+    return response
+
 @app.route('/api/drives/<drive_id>/qr-code', methods=['GET'])
 def get_drive_qr_code(drive_id):
     """Serve a QR code for a drive"""
