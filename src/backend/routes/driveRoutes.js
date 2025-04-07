@@ -323,7 +323,7 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
-// POST generate and print QR code
+// POST generate and print drive label
 router.post('/:id/print-label', async (req, res) => {
   try {
     const drive = await StorageDrive.findById(req.params.id);
@@ -332,20 +332,230 @@ router.post('/:id/print-label', async (req, res) => {
       return res.status(404).json({ error: 'Drive not found' });
     }
     
-    // TODO: Implement actual NIIMBOT printing logic here
-    // This would connect to the printer and print the label
+    // Generate drive label
+    const labelResult = await drive.generateLabel(true);
     
-    // For now, just mark as printed
-    drive.labelPrinted = true;
-    await drive.save();
+    if (!labelResult.success) {
+      return res.status(500).json({ 
+        error: 'Failed to generate drive label', 
+        details: labelResult.error 
+      });
+    }
     
-    res.json({ 
-      message: 'Drive label printed successfully',
-      qrCodeUrl: drive.qrCode
+    // Check if we should print directly
+    const { printDirectly } = req.body;
+    
+    if (printDirectly) {
+      // Use Niimbot printer integration
+      const NiimbotPrinter = require('../utils/niimbot-printer');
+      
+      try {
+        // Create printer instance
+        const printer = await NiimbotPrinter.createPrinter({
+          model: 'D101'
+        });
+        
+        // Discover printers
+        const printers = await printer.discoverPrinters();
+        
+        if (printers.length === 0) {
+          return res.json({
+            success: true,
+            printed: false,
+            labelUrl: labelResult.filePath,
+            dataUrl: labelResult.dataUrl,
+            message: 'Label generated but no Niimbot printers found for direct printing',
+            manualInstructions: NiimbotPrinter.getManualPrintingInstructions()
+          });
+        }
+        
+        // Connect to first discovered printer
+        await printer.connect(printers[0].id);
+        
+        // Print the label
+        await printer.printLabel(labelResult.labelBuffer);
+        
+        // Disconnect
+        await printer.disconnect();
+        
+        return res.json({
+          success: true,
+          printed: true,
+          labelUrl: labelResult.filePath,
+          dataUrl: labelResult.dataUrl,
+          message: `Label printed successfully on ${printers[0].name}`
+        });
+      } catch (printerError) {
+        console.error('Error printing with Niimbot:', printerError);
+        
+        // Return success but with manual instructions
+        return res.json({
+          success: true,
+          printed: false,
+          labelUrl: labelResult.filePath,
+          dataUrl: labelResult.dataUrl,
+          message: 'Label generated but printer error occurred',
+          error: printerError.message,
+          manualInstructions: NiimbotPrinter.getManualPrintingInstructions()
+        });
+      }
+    }
+    
+    // Return success with label info but no direct printing
+    res.json({
+      success: true,
+      printed: false,
+      labelUrl: labelResult.filePath,
+      dataUrl: labelResult.dataUrl,
+      message: 'Drive label generated successfully - use browser or Niimbot app to print'
     });
   } catch (error) {
-    console.error('Error printing drive label:', error);
-    res.status(500).json({ error: 'Failed to print drive label' });
+    console.error('Error generating/printing drive label:', error);
+    res.status(500).json({ error: 'Failed to generate or print drive label' });
+  }
+});
+
+// POST assign drive to location and generate labels for both
+router.post('/:id/assign-location', async (req, res) => {
+  try {
+    const { bay, shelf, position, generateLabels = true, printLabels = false } = req.body;
+    
+    if (!bay || !shelf || !position) {
+      return res.status(400).json({ error: 'Bay, shelf, and position are required' });
+    }
+    
+    // Find drive
+    const drive = await StorageDrive.findById(req.params.id);
+    if (!drive) {
+      return res.status(404).json({ error: 'Drive not found' });
+    }
+    
+    // Find or create location
+    const PhysicalLocation = require('../models/physicalLocation');
+    
+    let location = await PhysicalLocation.findOne({
+      bay: parseInt(bay),
+      shelf: parseInt(shelf),
+      position: parseInt(position)
+    });
+    
+    if (!location) {
+      // Create new location
+      location = new PhysicalLocation({
+        bay: parseInt(bay),
+        shelf: parseInt(shelf),
+        position: parseInt(position),
+        status: 'EMPTY'
+      });
+      await location.save();
+    } else if (location.status === 'OCCUPIED' && location.occupiedBy !== drive.driveId) {
+      return res.status(400).json({
+        error: `Location ${location.locationId} is already occupied by drive ${location.occupiedBy}`,
+        currentOccupant: location.occupiedBy
+      });
+    }
+    
+    // Update location
+    location.status = 'OCCUPIED';
+    location.occupiedBy = drive.driveId;
+    await location.save();
+    
+    // Update drive
+    drive.location = location.locationId;
+    await drive.save();
+    
+    // Generate labels if requested
+    const labels = {};
+    
+    if (generateLabels) {
+      // Generate drive label
+      const driveLabel = await drive.generateLabel(true);
+      if (driveLabel.success) {
+        labels.drive = {
+          success: true,
+          url: driveLabel.filePath,
+          dataUrl: driveLabel.dataUrl
+        };
+      }
+      
+      // Generate location label
+      const locationLabel = await location.generateLabel(true);
+      if (locationLabel.success) {
+        labels.location = {
+          success: true,
+          url: locationLabel.filePath,
+          dataUrl: locationLabel.dataUrl
+        };
+      }
+      
+      // Print labels if requested
+      if (printLabels && (labels.drive?.success || labels.location?.success)) {
+        const NiimbotPrinter = require('../utils/niimbot-printer');
+        
+        try {
+          // Create printer instance
+          const printer = await NiimbotPrinter.createPrinter({
+            model: 'D101'
+          });
+          
+          // Discover printers
+          const printers = await printer.discoverPrinters();
+          
+          if (printers.length > 0) {
+            // Connect to first discovered printer
+            await printer.connect(printers[0].id);
+            
+            // Print labels
+            const labelsToPrint = [];
+            if (labels.drive?.success) labelsToPrint.push(labels.drive.url);
+            if (labels.location?.success) labelsToPrint.push(labels.location.url);
+            
+            const printResult = await printer.printBatch(labelsToPrint);
+            
+            // Disconnect
+            await printer.disconnect();
+            
+            labels.printed = {
+              success: printResult.success > 0,
+              count: printResult.success,
+              total: printResult.total,
+              printer: printers[0].name
+            };
+          } else {
+            labels.printed = {
+              success: false,
+              message: 'No Niimbot printers found for direct printing',
+              manualInstructions: NiimbotPrinter.getManualPrintingInstructions()
+            };
+          }
+        } catch (printerError) {
+          console.error('Error printing with Niimbot:', printerError);
+          labels.printed = {
+            success: false,
+            error: printerError.message,
+            manualInstructions: NiimbotPrinter.getManualPrintingInstructions()
+          };
+        }
+      }
+    }
+    
+    res.json({
+      success: true,
+      drive: {
+        id: drive.driveId,
+        name: drive.name
+      },
+      location: {
+        id: location.locationId,
+        bay: location.bay,
+        shelf: location.shelf,
+        position: location.position
+      },
+      labels
+    });
+  } catch (error) {
+    console.error('Error assigning drive to location:', error);
+    res.status(500).json({ error: 'Failed to assign drive to location' });
   }
 });
 

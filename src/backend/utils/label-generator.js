@@ -14,9 +14,16 @@ const sharp = require('sharp');
 // Define constants for label dimensions
 const LABEL_DIMENSIONS = {
   standard: {
-    widthMm: 20,
-    heightMm: 70,
-    dpi: 300,  // NIIMBOT D101 printer DPI
+    widthMm: 70,   // Width of the label
+    heightMm: 20,  // Height of the label (D101 printer)
+    dpi: 300,      // NIIMBOT D101 printer DPI
+    get widthPx() { return Math.round(this.widthMm * this.dpi / 25.4); },
+    get heightPx() { return Math.round(this.heightMm * this.dpi / 25.4); }
+  },
+  shelf: {
+    widthMm: 50,   // Width of the label (shorter than standard)
+    heightMm: 20,  // Height of the label (D101 printer)
+    dpi: 300,      // NIIMBOT D101 printer DPI
     get widthPx() { return Math.round(this.widthMm * this.dpi / 25.4); },
     get heightPx() { return Math.round(this.heightMm * this.dpi / 25.4); }
   }
@@ -73,63 +80,68 @@ async function createDriveLabel(driveInfo, options = {}) {
     date: new Date().toISOString()
   };
   
-  // QR code size - optimized for the label height
-  const qrSize = dimensions.widthPx - 10; // Slightly smaller than the width
+  // QR code size - making it approximately 1/3 of label width
+  const qrSize = Math.round(dimensions.widthPx * 0.3);
   const qrBuffer = await generateQRImage(qrData, qrSize);
   const qrImage = await loadImage(qrBuffer);
   
-  // Draw QR code at the top
-  const qrYPosition = 5;
-  ctx.drawImage(qrImage, 5, qrYPosition, qrSize, qrSize);
+  // Draw QR code on the left side
+  const qrXPosition = 5;
+  const qrYPosition = (dimensions.heightPx - qrSize) / 2; // Center vertically
+  ctx.drawImage(qrImage, qrXPosition, qrYPosition, qrSize, qrSize);
   
   // Set up text rendering
   ctx.fillStyle = '#000000';
   
-  // Current y position for drawing text
-  let yPos = qrYPosition + qrSize + 5;
+  // Define the right section starting position
+  const textXPosition = qrXPosition + qrSize + 5;
+  const textWidth = dimensions.widthPx - textXPosition - 5;
   
   // Get root folder information
   const rootFolders = driveInfo.rootFolders || ['No folders found'];
   
-  // Draw root folders with largest text
-  ctx.font = 'bold 11px Arial';
+  // Position for content in the middle section
+  let yPos = 10;
+  
+  // Draw root folders with largest text (in top section of middle column)
+  ctx.font = 'bold 12px Arial';
   const rootFolderLimit = 5; // Limit to prevent text overflow
   
   for (let i = 0; i < Math.min(rootFolders.length, rootFolderLimit); i++) {
     const folder = rootFolders[i];
-    const folderName = folder.length > 15 ? folder.substring(0, 15) + '...' : folder;
+    const folderName = folder.length > 20 ? folder.substring(0, 20) + '...' : folder;
     
-    ctx.fillText(folderName, 10, yPos);
+    ctx.fillText(folderName, textXPosition, yPos);
     yPos += 14;
   }
   
   // Draw drive name with medium-sized text
-  yPos += 5; // Add some spacing
-  ctx.font = '10px Arial';
+  yPos += 10; // Add some spacing
+  ctx.font = 'bold 11px Arial';
   const driveName = driveInfo.name || 'Unnamed Drive';
-  ctx.fillText(driveName, 10, yPos);
-  yPos += 12;
+  ctx.fillText(driveName, textXPosition, yPos);
+  yPos += 15;
   
   // Draw drive ID with smaller text
-  ctx.font = '8px Arial';
-  ctx.fillText(`ID: ${driveInfo.driveId}`, 10, yPos);
-  yPos += 10;
+  ctx.font = '9px Arial';
+  ctx.fillText(`ID: ${driveInfo.driveId}`, textXPosition, yPos);
+  yPos += 12;
   
   // Draw file stats with smallest text
-  ctx.font = '7px Arial';
+  ctx.font = '8px Arial';
   
   // Add media type counts if available
   if (driveInfo.mediaStats) {
     const stats = driveInfo.mediaStats;
     for (const [type, count] of Object.entries(stats)) {
-      ctx.fillText(`${type}: ${count}`, 10, yPos);
-      yPos += 8;
+      ctx.fillText(`${type}: ${count}`, textXPosition, yPos);
+      yPos += 10;
     }
   }
   
   // Draw date in smallest text at the bottom
   const date = new Date(driveInfo.createdAt || new Date()).toLocaleDateString();
-  ctx.fillText(`Added: ${date}`, 10, dimensions.heightPx - 5);
+  ctx.fillText(`Added: ${date}`, textXPosition, dimensions.heightPx - 5);
   
   // Convert canvas to buffer
   const buffer = canvas.toBuffer('image/png');
@@ -144,8 +156,8 @@ async function createDriveLabel(driveInfo, options = {}) {
  * @returns {Promise<Buffer>} - Label image as buffer
  */
 async function createLocationLabel(locationInfo, options = {}) {
-  // Use standard dimensions unless specified
-  const labelType = options.labelType || 'standard';
+  // Use shelf dimensions by default for location labels
+  const labelType = options.labelType || 'shelf';
   const dimensions = LABEL_DIMENSIONS[labelType];
   
   // Create canvas for the label
@@ -165,22 +177,40 @@ async function createLocationLabel(locationInfo, options = {}) {
     position: locationInfo.position
   };
   
-  // QR code size - optimized for the label height
-  const qrSize = dimensions.widthPx - 10;
+  // QR code size - making it approximately 1/3 of label width
+  const qrSize = Math.round(dimensions.widthPx * 0.3);
   const qrBuffer = await generateQRImage(qrData, qrSize);
   const qrImage = await loadImage(qrBuffer);
   
-  // Draw QR code at the top
-  ctx.drawImage(qrImage, 5, 5, qrSize, qrSize);
+  // Draw QR code on the left side
+  const qrXPosition = 5;
+  const qrYPosition = (dimensions.heightPx - qrSize) / 2; // Center vertically
+  ctx.drawImage(qrImage, qrXPosition, qrYPosition, qrSize, qrSize);
   
-  // Current y position for drawing text
-  let yPos = qrSize + 15;
-  
-  // Draw location in large text
+  // Set up text rendering
   ctx.fillStyle = '#000000';
-  ctx.font = 'bold 14px Arial';
+  
+  // Define the right section starting position
+  const textXPosition = qrXPosition + qrSize + 5;
+  
+  // Draw location ID in largest text
+  ctx.fillStyle = '#000000';
+  ctx.font = 'bold 18px Arial';
   const locationText = `B${locationInfo.bay}-S${locationInfo.shelf}-P${locationInfo.position}`;
-  ctx.fillText(locationText, 10, yPos);
+  // Center the text vertically
+  ctx.fillText(locationText, textXPosition, dimensions.heightPx / 2 + 6);
+  
+  // Add status if available
+  if (locationInfo.status) {
+    ctx.font = '10px Arial';
+    ctx.fillText(`Status: ${locationInfo.status}`, textXPosition, dimensions.heightPx / 2 + 20);
+  }
+  
+  // Add section label if available
+  if (locationInfo.section) {
+    ctx.font = '10px Arial';
+    ctx.fillText(`Section: ${locationInfo.section}`, textXPosition, dimensions.heightPx / 2 - 10);
+  }
   
   return canvas.toBuffer('image/png');
 }

@@ -86,24 +86,54 @@ Each location (or shelf section) has a QR code containing:
 
 ## Label Printing with NIIMBOT
 
-The system generates two types of labels for NIIMBOT printers:
+The system generates two types of labels for NIIMBOT D101 thermal printers:
 
 ### Drive Labels (20mm × 70mm)
 
 Each drive label includes:
 - QR code (left side)
-- Root folder names (largest text)
+- Root folder names (largest text) - Displays the top-level client/project folders
 - Drive name (medium text) 
 - Drive ID (smaller text)
-- Media type statistics
+- Media type statistics - Count of each file type (R3D, ProRes, RAW, etc.)
 - Registration date
 
-### Location Labels (20mm × 70mm)
+Drive label template:
+```
+|---------------------------------------------------------------------------|
+|  +-------+                                                                |
+|  |       |   CLIENT A - PROJECT X                                         |
+|  |  QR   |   CLIENT B - COMMERCIAL                                        |
+|  | CODE  |   CLIENT C - DOCUMENTARY                                       |
+|  |       |                                                                |
+|  |       |   DRIVE NAME                                                   |
+|  +-------+   ID: DRIVE-001                                                |
+|              R3D Video: 145  ProRes: 53                                   |
+|              RAW Photos: 1289  Audio: 76                                  |
+|                                                                           |
+|              Added: 04/07/2025                                            |
+|---------------------------------------------------------------------------|
+```
+
+### Location Labels (20mm × 50mm)
 
 Each location label includes:
-- QR code
-- Location ID (Bay-Shelf-Position)
+- QR code (left side)
+- Location ID (Bay-Shelf-Position) in large text
+- Status (Empty/Occupied/Reserved)
 - Optional section or client name
+
+Location label template:
+```
+|------------------------------------------------------|
+|  +-------+                                           |
+|  |       |                                           |
+|  |  QR   |   B2-S3-P5                                |
+|  | CODE  |   Status: EMPTY                           |
+|  |       |                                           |
+|  +-------+                                           |
+|------------------------------------------------------|
+```
 
 ## Implementation Tips
 
@@ -139,5 +169,53 @@ Each location label includes:
 3. Scan drive QR code
 4. System updates drive's location in database
 5. Place drive in the location
+
+## Label Generation Tools
+
+VaultKeeper provides several tools for working with the physical location system:
+
+### Command-Line Tools
+
+1. **Generate Test Labels** - Creates sample labels for testing
+   ```
+   node scripts/generate-test-labels.js
+   ```
+
+2. **Create Shelf Locations** - Batch creates locations and labels for a bay/shelf
+   ```
+   node scripts/create-shelf-locations.js
+   ```
+   This interactive script lets you create multiple shelf positions at once.
+
+3. **Assign Drive Location** - Places a drive at a specific shelf location
+   ```
+   node scripts/assign-drive-location.js
+   ```
+   This interactive script lets you assign a drive to a location and generates labels for both.
+
+### API Endpoints
+
+The system also provides API endpoints for label management:
+
+1. **Generate Drive Label**: `POST /api/drives/{id}/print-label`
+   - Generates a label for a drive
+   - Optionally prints directly to a NIIMBOT printer if available
+
+2. **Assign Drive to Location**: `POST /api/drives/{id}/assign-location`
+   - Assigns a drive to a specific bay-shelf-position
+   - Creates the location if it doesn't exist
+   - Generates labels for both the drive and location
+
+3. **Manage Locations**: `GET/POST /api/locations`
+   - Create, update, and query physical locations
+   - Generate labels for locations
+
+## Direct vs. Manual Printing
+
+The system supports two printing methods:
+
+1. **Direct Printing**: When a compatible NIIMBOT printer is connected directly to the server, the system can print labels automatically.
+
+2. **Manual Printing**: All labels are saved as PNG files in the `public/labels` directory, which can be transferred to a mobile device and printed using the NIIMBOT mobile app.
 
 By following this system, you'll maintain full tracking capabilities while allowing for flexible physical organization that can adapt to your changing storage needs.

@@ -120,7 +120,11 @@ const storageDriveSchema = new Schema({
   registeredBy: {
     type: String,
     default: 'system'
-  }
+  },
+  rootFolders: [{
+    type: String,
+    trim: true
+  }]
 }, {
   timestamps: true,
   toJSON: { virtuals: true },
@@ -333,6 +337,109 @@ storageDriveSchema.methods.getUsageStats = async function() {
       }
     };
   } catch (error) {
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+};
+
+// Method to scan root folders on the drive
+storageDriveSchema.methods.scanRootFolders = async function() {
+  try {
+    const fs = require('fs').promises;
+    const path = require('path');
+    
+    // Check if drive is mounted
+    try {
+      await fs.access(this.path);
+    } catch (error) {
+      return {
+        success: false,
+        error: `Drive not accessible at ${this.path}: ${error.message}`
+      };
+    }
+    
+    // Get all items in the root directory
+    const items = await fs.readdir(this.path, { withFileTypes: true });
+    
+    // Filter to only include directories and ignore hidden folders
+    const rootFolders = items
+      .filter(item => item.isDirectory() && !item.name.startsWith('.'))
+      .map(item => item.name);
+    
+    // Update the drive record
+    this.rootFolders = rootFolders;
+    await this.save();
+    
+    return {
+      success: true,
+      rootFolders
+    };
+  } catch (error) {
+    console.error(`Error scanning root folders for drive ${this.name}:`, error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+};
+
+// Method to generate a label for the drive
+storageDriveSchema.methods.generateLabel = async function(saveToFile = true) {
+  try {
+    const labelGenerator = require('../utils/label-generator');
+    
+    // Get drive media stats
+    let mediaStats = {};
+    try {
+      const stats = await this.getUsageStats();
+      if (stats.success && stats.stats.byType) {
+        stats.stats.byType.forEach(item => {
+          mediaStats[item._id] = item.count;
+        });
+      }
+    } catch (err) {
+      console.log('Could not get detailed media stats, using basic file count');
+      mediaStats['Files'] = this.fileCount || 0;
+    }
+    
+    // Ensure we have root folders
+    if (!this.rootFolders || this.rootFolders.length === 0) {
+      try {
+        const folderScan = await this.scanRootFolders();
+        if (folderScan.success) {
+          console.log(`Scanned ${folderScan.rootFolders.length} root folders for drive ${this.name}`);
+        }
+      } catch (err) {
+        console.warn(`Could not scan root folders for drive ${this.name}:`, err.message);
+      }
+    }
+    
+    // Prepare drive info for label
+    const driveInfo = {
+      driveId: this.driveId,
+      name: this.name,
+      uuid: this.uuid,
+      rootFolders: this.rootFolders || [],
+      mediaStats: mediaStats,
+      createdAt: this.createdAt
+    };
+    
+    // Generate drive label
+    const result = await labelGenerator.generateDriveLabel(driveInfo, saveToFile, {
+      outputDir: 'public/labels'
+    });
+    
+    // Mark drive as having a label printed
+    if (result.success) {
+      this.physicalLabel = true;
+      await this.save();
+    }
+    
+    return result;
+  } catch (error) {
+    console.error(`Error generating label for drive ${this.name}:`, error);
     return {
       success: false,
       error: error.message
