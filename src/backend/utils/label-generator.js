@@ -38,7 +38,7 @@ const LABEL_DIMENSIONS = {
 async function generateQRImage(data, size = 236) {
   const qrOptions = {
     errorCorrectionLevel: 'M',
-    margin: 1,
+    margin: 2,  // Slightly larger margin for better scanning
     width: size,
     color: {
       dark: '#000000',
@@ -80,13 +80,13 @@ async function createDriveLabel(driveInfo, options = {}) {
     date: new Date().toISOString()
   };
   
-  // QR code size - making it approximately 1/3 of label width
-  const qrSize = Math.round(dimensions.widthPx * 0.3);
+  // QR code size - approximately 80% of label height
+  const qrSize = Math.round(dimensions.heightPx * 0.8);
   const qrBuffer = await generateQRImage(qrData, qrSize);
   const qrImage = await loadImage(qrBuffer);
   
   // Draw QR code on the left side
-  const qrXPosition = 5;
+  const qrXPosition = 10;
   const qrYPosition = (dimensions.heightPx - qrSize) / 2; // Center vertically
   ctx.drawImage(qrImage, qrXPosition, qrYPosition, qrSize, qrSize);
   
@@ -94,54 +94,71 @@ async function createDriveLabel(driveInfo, options = {}) {
   ctx.fillStyle = '#000000';
   
   // Define the right section starting position
-  const textXPosition = qrXPosition + qrSize + 5;
+  const textXPosition = qrXPosition + qrSize + 15; // More space between QR and text
   const textWidth = dimensions.widthPx - textXPosition - 5;
   
   // Get root folder information
   const rootFolders = driveInfo.rootFolders || ['No folders found'];
   
-  // Position for content in the middle section
-  let yPos = 10;
+  // Scale font sizes - use absolute values to ensure readability on small labels
+  const baseFontSize = Math.round(dimensions.heightPx * 0.3); // 30% of label height
+  const mediumFontSize = Math.round(dimensions.heightPx * 0.25); // 25% of label height  
+  const smallFontSize = Math.round(dimensions.heightPx * 0.18); // 18% of label height
+  
+  // First line should start near the top with some margin
+  let yPos = baseFontSize + 5;
   
   // Draw root folders with largest text (in top section of middle column)
-  ctx.font = 'bold 12px Arial';
-  const rootFolderLimit = 5; // Limit to prevent text overflow
+  ctx.font = `bold ${baseFontSize}px Arial`;
+  const rootFolderLimit = 2; // Limit to prevent text overflow
   
   for (let i = 0; i < Math.min(rootFolders.length, rootFolderLimit); i++) {
     const folder = rootFolders[i];
-    const folderName = folder.length > 20 ? folder.substring(0, 20) + '...' : folder;
+    const folderName = folder.length > 12 ? folder.substring(0, 12) + '...' : folder;
     
     ctx.fillText(folderName, textXPosition, yPos);
-    yPos += 14;
+    yPos += baseFontSize * 1.2;
   }
   
   // Draw drive name with medium-sized text
-  yPos += 10; // Add some spacing
-  ctx.font = 'bold 11px Arial';
+  yPos += mediumFontSize * 0.3; // Add some spacing
+  ctx.font = `bold ${mediumFontSize}px Arial`;
   const driveName = driveInfo.name || 'Unnamed Drive';
-  ctx.fillText(driveName, textXPosition, yPos);
-  yPos += 15;
+  if (driveName.length > 14) {
+    ctx.fillText(driveName.substring(0, 14) + '...', textXPosition, yPos);
+  } else {
+    ctx.fillText(driveName, textXPosition, yPos);
+  }
+  yPos += mediumFontSize * 1.2;
   
   // Draw drive ID with smaller text
-  ctx.font = '9px Arial';
+  ctx.font = `${smallFontSize}px Arial`;
   ctx.fillText(`ID: ${driveInfo.driveId}`, textXPosition, yPos);
-  yPos += 12;
+  yPos += smallFontSize * 1.2;
   
   // Draw file stats with smallest text
-  ctx.font = '8px Arial';
+  ctx.font = `${smallFontSize}px Arial`;
   
   // Add media type counts if available
   if (driveInfo.mediaStats) {
     const stats = driveInfo.mediaStats;
-    for (const [type, count] of Object.entries(stats)) {
-      ctx.fillText(`${type}: ${count}`, textXPosition, yPos);
-      yPos += 10;
+    // Limit to top 2 stats
+    const entries = Object.entries(stats).slice(0, 2);
+    for (const [type, count] of entries) {
+      const statText = `${type}: ${count}`;
+      // Truncate if too long
+      if (statText.length > 15) {
+        ctx.fillText(statText.substring(0, 15) + '...', textXPosition, yPos);
+      } else {
+        ctx.fillText(statText, textXPosition, yPos);
+      }
+      yPos += smallFontSize * 1.2;
     }
   }
   
-  // Draw date in smallest text at the bottom
+  // Draw date in small text at the bottom
   const date = new Date(driveInfo.createdAt || new Date()).toLocaleDateString();
-  ctx.fillText(`Added: ${date}`, textXPosition, dimensions.heightPx - 5);
+  ctx.fillText(`Added: ${date}`, textXPosition, dimensions.heightPx - smallFontSize);
   
   // Convert canvas to buffer
   const buffer = canvas.toBuffer('image/png');
@@ -177,13 +194,13 @@ async function createLocationLabel(locationInfo, options = {}) {
     position: locationInfo.position
   };
   
-  // QR code size - making it approximately 1/3 of label width
-  const qrSize = Math.round(dimensions.widthPx * 0.3);
+  // QR code size - approximately 80% of label height
+  const qrSize = Math.round(dimensions.heightPx * 0.8);
   const qrBuffer = await generateQRImage(qrData, qrSize);
   const qrImage = await loadImage(qrBuffer);
   
   // Draw QR code on the left side
-  const qrXPosition = 5;
+  const qrXPosition = 10;
   const qrYPosition = (dimensions.heightPx - qrSize) / 2; // Center vertically
   ctx.drawImage(qrImage, qrXPosition, qrYPosition, qrSize, qrSize);
   
@@ -191,25 +208,35 @@ async function createLocationLabel(locationInfo, options = {}) {
   ctx.fillStyle = '#000000';
   
   // Define the right section starting position
-  const textXPosition = qrXPosition + qrSize + 5;
+  const textXPosition = qrXPosition + qrSize + 15; // More space between QR and text
   
+  // Fixed, large font sizes for the location label
+  const largeFontSize = Math.round(dimensions.heightPx * 0.5); // 50% of label height for location ID
+  const mediumFontSize = Math.round(dimensions.heightPx * 0.3); // 30% of label height for status
+  const smallFontSize = Math.round(dimensions.heightPx * 0.2); // 20% of label height for section
+
   // Draw location ID in largest text
   ctx.fillStyle = '#000000';
-  ctx.font = 'bold 18px Arial';
+  ctx.font = `bold ${largeFontSize}px Arial`;
   const locationText = `B${locationInfo.bay}-S${locationInfo.shelf}-P${locationInfo.position}`;
-  // Center the text vertically
-  ctx.fillText(locationText, textXPosition, dimensions.heightPx / 2 + 6);
+  
+  // Center the text vertically - adjust for larger font
+  const textY = dimensions.heightPx / 2 + largeFontSize / 3;
+  ctx.fillText(locationText, textXPosition, textY);
   
   // Add status if available
   if (locationInfo.status) {
-    ctx.font = '10px Arial';
-    ctx.fillText(`Status: ${locationInfo.status}`, textXPosition, dimensions.heightPx / 2 + 20);
+    ctx.font = `bold ${mediumFontSize}px Arial`;
+    ctx.fillText(`${locationInfo.status}`, textXPosition, textY + mediumFontSize);
   }
   
   // Add section label if available
   if (locationInfo.section) {
-    ctx.font = '10px Arial';
-    ctx.fillText(`Section: ${locationInfo.section}`, textXPosition, dimensions.heightPx / 2 - 10);
+    ctx.font = `${smallFontSize}px Arial`;
+    const sectionText = locationInfo.section.length > 15 ? 
+                        locationInfo.section.substring(0, 15) + '...' : 
+                        locationInfo.section;
+    ctx.fillText(sectionText, textXPosition, textY - largeFontSize / 2);
   }
   
   return canvas.toBuffer('image/png');
